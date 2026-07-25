@@ -24,6 +24,7 @@
     "migration:generate": "npm run typeorm -- migration:generate",
     "migration:run": "npm run typeorm -- migration:run",
     "migration:revert": "npm run typeorm -- migration:revert",
+    "auth:keygen": "node scripts/generate-api-key.js",
     "contract:compile": "node scripts/compile-contract.js",
     "contract:deploy": "node scripts/deploy-contract.js",
     "chain:node": "hardhat node --port 8545"
