@@ -57,7 +57,8 @@ COPY --chown=node:node package.json ./
 COPY --chown=node:node schemas ./schemas
 
 # Scripts de deploiement du contrat : utilises par le service `contract-deployer`
-# de docker-compose, qui partage cette meme image.
+# de docker-compose, qui partage cette meme image. Le script charge l'artefact
+# compile depuis `dist/blockchain/contracts/`.
 COPY --chown=node:node scripts ./scripts
 
 # Ne jamais executer l'API en root.

@@ -5,8 +5,9 @@
  *   npm run contract:deploy
  *
  * Variables utilisees : BLOCKCHAIN_RPC_URL, BLOCKCHAIN_PRIVATE_KEY.
- * L'adresse est ecrite dans .contract-address (ignore par Git) afin que le
- * script de demarrage et les tests puissent la reprendre sans copier-coller.
+ * En developpement, l'adresse est ecrite dans .contract-address (ignore par
+ * Git). En production, aucun fichier n'est cree sauf si
+ * BLOCKCHAIN_CONTRACT_ADDRESS_FILE est explicitement defini.
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -73,11 +74,22 @@ async function main() {
   console.log(`  bloc     : ${receipt.blockNumber}`);
   console.log(`  gaz      : ${receipt.gasUsed}`);
 
-  fs.writeFileSync(path.join(ROOT, '.contract-address'), `${address}\n`);
+  const addressFile =
+    process.env.BLOCKCHAIN_CONTRACT_ADDRESS_FILE ??
+    (process.env.NODE_ENV === 'production' ? null : path.join(ROOT, '.contract-address'));
+
+  if (addressFile) {
+    fs.writeFileSync(addressFile, `${address}\n`);
+    console.log(`  fichier  : ${addressFile}`);
+  }
   console.log(`\nRenseignez BLOCKCHAIN_CONTRACT_ADDRESS=${address} dans votre .env`);
 }
 
-main().catch((error) => {
-  console.error(`Deploiement en echec : ${error.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`Deploiement en echec : ${error.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { loadArtifact, main };
