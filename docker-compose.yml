@@ -138,6 +138,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-log}
       AUDIT_MAX_PAYLOAD_CHARS: ${AUDIT_MAX_PAYLOAD_CHARS:-8000}
       AUDIT_PERSIST_PAYLOADS: ${AUDIT_PERSIST_PAYLOADS:-true}
+      SECURITY_MASTER_KEY: ${SECURITY_MASTER_KEY:-local-demo-master-key-a-remplacer}
+      SECURITY_KEY_SALT: ${SECURITY_KEY_SALT:-banking-gateway-hkdf-salt}
     ports:
       - '${PORT:-3000}:3000'
     networks:

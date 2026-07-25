@@ -83,7 +83,7 @@ Le flux de virement classique (`POST /transfers`) suit le même modèle en une s
 | Blockchain       | Chaîne EVM locale (Anvil / nœud Hardhat) + contrat Solidity |
 | Client chaîne    | `ethers` v6                                                 |
 | Documentation    | Swagger / OpenAPI 3                                         |
-| Tests            | Jest + Supertest — **370 tests**                            |
+| Tests            | Jest + Supertest — **380 tests**                            |
 | Conteneurisation | Docker multi-stage + Docker Compose                         |
 
 `xmllint-wasm` a été retenu plutôt que `libxmljs` (compilation native) ou `xsd-schema-validator`
@@ -162,8 +162,12 @@ Authorization: Bearer <keyId>.<secret>
 ```
 
 Les droits sont indépendants : `transfers:read`, `transfers:write`, `refunds:write`,
-`reconciliation:write`, `ledger:read`, `treasury:write`, `anchors:read`, `anchors:write` et
-`simulator:write`.
+`refunds:approve`, `reconciliation:write`, `ledger:read`, `treasury:write`, `anchors:read`,
+`anchors:write` et `simulator:write`.
+
+`refunds:write` et `refunds:approve` sont **délibérément séparés** : le premier fait sortir des
+fonds, le second lève un refus fournisseur. Les confondre reviendrait à n'avoir qu'un seul niveau de
+décision sur un flux de litige.
 `AUTH_ENABLED=false` est réservé au développement et bloque le démarrage en production.
 
 ---
@@ -500,15 +504,15 @@ falsifier les deux côtés, et c'est la base elle-même qui la refuse.
 
 ### Où vivent les IBAN complets
 
-| Destination                      | IBAN complet ?                                          |
-| -------------------------------- | ------------------------------------------------------- |
-| Table `transactions`             | **Oui** — nécessaire à l'exécution du virement          |
-| `transaction_events` (ouverture) | **Oui** — référence de la confrontation, jamais publiée |
-| Document scellé (transitoire)    | **Oui** — c'est l'objet de la preuve, jamais publié     |
-| Réponses HTTP                    | Non — masqué `FR76****0189`                             |
-| Logs applicatifs                 | Non — masqué                                            |
-| Table `audit_logs`               | Non — masqué puis tronqué                               |
-| Blockchain                       | Non — seule une racine de Merkle y figure               |
+| Destination                      | IBAN complet ?                                                  |
+| -------------------------------- | --------------------------------------------------------------- |
+| Table `transactions`             | **Chiffré** — AES-256-GCM, nécessaire à l'exécution du virement |
+| `transaction_events` (ouverture) | **Chiffré** — référence de la confrontation, jamais publiée     |
+| Document scellé (transitoire)    | **En clair, en mémoire** — c'est l'objet de la preuve           |
+| Réponses HTTP                    | Non — masqué `FR76****0189`                                     |
+| Logs applicatifs                 | Non — masqué                                                    |
+| Table `audit_logs`               | Non — masqué puis tronqué                                       |
+| Blockchain                       | Non — seule une racine de Merkle y figure                       |
 
 Le masquage opère à trois niveaux (`src/common/utils/masking.util.ts`) : IBAN (`FR76****0189`),
 secrets (`[REDACTED]` intégral), et **texte libre / XML par détection de motif** — un IBAN glissé
@@ -518,6 +522,68 @@ La route `/events` expose `debtorIbanMasked` et `creditorIbanMasked`, jamais les
 test e2e inspecte le corps entier de la réponse pour s'en assurer. La règle est vérifiée en exécution
 réelle : sur 445 lignes de log produites par un virement complet, **zéro** occurrence d'IBAN en
 clair.
+
+### Chiffrement au repos
+
+Les IBAN et les noms de partie sont chiffrés en **AES-256-GCM** dans `transactions` et
+`transaction_events`. GCM authentifie le chiffré : une altération est détectée au déchiffrement, elle
+n'est pas subie. Chaque colonne est liée comme donnée authentifiée additionnelle : déplacer le
+chiffré d'un IBAN bénéficiaire vers une colonne donneur d'ordre échoue aussi au déchiffrement.
+
+#### Le piège que cela aurait pu être
+
+Les IBAN entrent dans le **document scellé**. Si le chiffrement n'était pas transparent, le XML
+canonique changerait — et toutes les preuves déjà publiées sur la chaîne deviendraient
+invérifiables d'un seul coup. Le projet passerait de « altération détectée » à « altération
+partout », sans qu'aucune donnée n'ait bougé.
+
+Le chiffrement vit dans un transformateur TypeORM, donc **sous** l'entité : le document est
+construit depuis le clair, les empreintes ne bougent pas d'un octet. Un test e2e le verrouille, et
+un autre prouve par lecture SQL brute que la base ne contient que du chiffré — la seule manière de
+le démontrer, puisque toute lecture applicative montrerait le clair même sans chiffrement.
+
+#### Deux décisions
+
+**L'échec est bruyant.** Sans clé installée, l'écriture lève. Se rabattre sur le clair produirait
+exactement le défaut que ce chiffrement existe pour empêcher : une base qu'on croit protégée et qui
+ne l'est pas.
+
+**Le clair hérité est toléré en lecture.** Les lignes antérieures ne portent pas le préfixe de
+version `enc.v1.` et sont rendues telles quelles ; toute écriture chiffre. Convertir en masse
+supposerait de faire transiter la clé par l'outillage de schéma — élargir la surface d'exposition du
+secret pour chiffrer des lignes de démonstration ne le vaut pas. Le retour arrière de la migration
+**refuse** de s'exécuter s'il reste du chiffré, plutôt que de le tronquer.
+
+### Garde des secrets
+
+L'application demande une **signature** ou une **clé de données**, jamais la clé maîtresse
+(`src/security/key-custody.port.ts`). `EvmAnchorClient` ne lit plus de clé privée : il reçoit un
+signataire. Un adaptateur KMS peut donc ne jamais divulguer le secret — c'est ce qui distingue un
+secret gardé d'un secret simplement rangé ailleurs.
+
+> **Ce que cela vaut aujourd'hui.** L'adaptateur livré est local : il lit la configuration du
+> processus, et le journalise en `WARN` au démarrage. Le port établit la frontière ; c'est
+> l'adaptateur qui apporte la garantie. **Une architecture prête pour un KMS n'est pas un KMS.**
+
+La seule propriété réellement ajoutée sans coffre : les clés sont dérivées par **HKDF** avec une
+étiquette de domaine. Compromettre le chiffrement ne livre pas la signature.
+
+### Séparation des tâches
+
+Sur le flux de litige, deux habilitations distinctes :
+
+| Habilitation      | Point d'entrée                        | Nature                               |
+| ----------------- | ------------------------------------- | ------------------------------------ |
+| `refunds:write`   | `POST /transfers/{ref}/refund`        | Opération — fait sortir des fonds    |
+| `refunds:approve` | `POST /transfers/{ref}/refund/reopen` | Contrôle — lève un refus fournisseur |
+
+Le contrôle ne s'arrête pas aux habilitations : **la clé qui a demandé un remboursement ne peut pas
+lever son propre refus**, même munie des deux droits. Sans cela, un acteur forcerait indéfiniment un
+remboursement que le fournisseur refuse, sans qu'aucun tiers ne l'examine. Un test le prouve avec
+une clé qui cumule les rôles.
+
+Les deux acteurs sont consignés au registre : `requestedBy` sur `REFUND_REQUESTED`, `reopenedBy` sur
+`REFUND_REOPENED`.
 
 ### Durcissement des parseurs
 
@@ -736,12 +802,13 @@ La clé de contrôle MOD 97-10 n'étant pas exprimable en XSD 1.0, elle reste v�
 
 ### Migrations
 
-Onze migrations, rejouables depuis une base vide, `schema:log` propre à l'arrivée :
+Douze migrations, rejouables depuis une base vide, `schema:log` propre à l'arrivée :
 
 ```
 InitialSchema · AddBlockchainAudit · AddMobileMoneyFlow · SplitPaymentStatuses
 AddTransactionEvents · AddRefunds · RefundReopenAndIntegrity · AddClosureProof
 LedgerReplacesSnapshot · AddStateInvariants · AddDoubleEntryLedger
+EncryptPartyFields
 ```
 
 ---
@@ -749,8 +816,8 @@ LedgerReplacesSnapshot · AddStateInvariants · AddDoubleEntryLedger
 ## Tests
 
 ```bash
-npm test          # 237 tests unitaires
-npm run test:e2e  # 133 tests d'intégration (PostgreSQL requis, exécution sérielle)
+npm test          # 244 tests unitaires
+npm run test:e2e  # 136 tests d'intégration (PostgreSQL requis, exécution sérielle)
 npm run test:cov  # couverture
 ```
 
@@ -771,6 +838,8 @@ Couverture notable :
   protection append-only imposée par la base ;
 - **Machine à états** — chemins réels du flux acceptés, retours en arrière et états impossibles
   refusés, diagnostic complet plutôt que première violation ;
+- **Sécurité** — chiffré en base vérifié par lecture SQL brute, empreintes toujours vérifiables
+  malgré le chiffrement, séparation des tâches y compris pour une clé cumulant les deux rôles ;
 - **Ledger** — équilibre sur chaque flux, écriture déséquilibrée refusée en SQL direct, dette
   chiffrée puis éteinte au centime, commission acquise puis contre-passée, rapatriement idempotent,
   virement classique sans aucune écriture ;
@@ -828,6 +897,9 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 | État impossible écrit en SQL direct             | Rejeté par les contraintes `CHECK` (3 cas éprouvés)                                               |
 | Écriture comptable déséquilibrée en SQL direct  | Rejetée au commit par le déclencheur d'équilibre                                                  |
 | Écart de 1200 sur 1250.75 commandés             | `PAYER_PAYABLE = 1200.00` — la dette porte un montant, non un drapeau                             |
+| Lecture SQL brute des colonnes d'IBAN           | `enc.v1.…` — aucune occurrence en clair                                                           |
+| Vérification après chiffrement                  | `VERIFIED` — aucune empreinte publiée n'est invalidée                                             |
+| Réouverture par la clé demandeuse               | `403 SEGREGATION_OF_DUTIES`, même avec les deux habilitations                                     |
 | Consignation en échec pendant une écriture      | Écriture métier annulée ; aucun dossier orphelin, rejeu possible                                  |
 | Fuite d'IBAN (logs + audit + API)               | Aucune                                                                                            |
 
@@ -865,6 +937,10 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 │   │   ├── merkle.util.ts          #   arbre et preuves, compatibles OpenZeppelin
 │   │   ├── anchor.service.ts       #   lots, planification, reprises
 │   │   └── evm-anchor.client.ts    #   ethers ↔ contrat
+│   ├── security/                   # Garde des secrets et chiffrement au repos
+│   │   ├── key-custody.port.ts     #   signature et clé de données, jamais le secret
+│   │   ├── env-key-custody.adapter.ts
+│   │   └── field-cipher.ts         #   AES-256-GCM, transformateur TypeORM
 │   ├── auth/                       # Clés d'API hachées, scopes, refus par défaut
 │   ├── audit/ · common/ · config/ · database/ · health/
 ├── schemas/                        # transfer-request · transaction-event · transfer-response
@@ -885,7 +961,13 @@ Ce dépôt est une démonstration d'intégration, pas un service de paiement.
 - **Aucun débit réel.** Le service SOAP convertit un montant en lettres ; il ne contacte aucun
   système de règlement, et l'adaptateur de remboursement est un simulateur.
 - **Clé privée en variable d'environnement.** Acceptable sur une chaîne locale jetable dont le
-  compte #0 est public. En production, la signature relèverait d'un HSM ou d'un KMS.
+  compte #0 est public. La signature passe désormais par un port, donc brancher un HSM ou un KMS ne
+  demande qu'un adaptateur — mais l'adaptateur livré lit toujours l'environnement.
+- **Ni OAuth2 ni mTLS.** Écartés délibérément : sans fournisseur d'identité, OAuth2 reviendrait à
+  émettre nos propres jetons signés par un secret d'environnement — plus faible que les clés hachées
+  actuelles, qui ont un secret distinct par clé. Le mTLS se termine au reverse proxy en production ;
+  l'implémenter dans l'application démontrerait un dispositif qui ne correspond à aucun déploiement
+  réel.
 - **Chaîne locale.** Un registre réellement inviolable suppose une chaîne publique ou un consortium
   dont l'opérateur ne contrôle pas les validateurs. L'architecture est prête — `EvmAnchorClient`
   isole entièrement ethers — mais un testnet public introduirait une dépendance à un faucet et à un
@@ -897,7 +979,12 @@ Ce dépôt est une démonstration d'intégration, pas un service de paiement.
   désactiver. C'est précisément pour cela que l'ancrage existe : la garantie finale est hors base.
 - **Traitement synchrone du virement.** Le modèle cible serait une file de messages avec reprise
   durable plutôt qu'un appel bloquant dans le cycle HTTP.
-- **IBAN stockés en clair.** En production, chiffrement au repos ou coffre à jetons.
+- **Chiffrement au repos sans coffre.** Les IBAN sont chiffrés, mais la clé est dérivée d'un secret
+  d'environnement : qui lit l'environnement lit les données. Le port de garde rend le remplacement
+  par un KMS possible sans toucher au reste — il ne le remplace pas.
+- **Aucune rotation de clé.** Le préfixe `enc.v1.` la rendrait possible, mais rien ne réchiffre les
+  lignes existantes.
+- **Lignes antérieures en clair.** Elles ne sont converties qu'à la réécriture.
 - **Pas de purge.** Le registre croît indéfiniment et, par nature, ne peut pas être élagué sans
   rompre le chaînage. Une politique de rétention supposerait d'archiver des segments clos avec leur
   preuve de synthèse.
