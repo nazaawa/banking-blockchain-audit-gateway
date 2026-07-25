@@ -2,10 +2,11 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditLog } from '../audit/entities/audit-log.entity';
+import { AnchorBatch } from '../blockchain/entities/anchor-batch.entity';
 import { Transaction } from '../transactions/entities/transaction.entity';
 
 /** Entites gerees par TypeORM, partagees avec la CLI de migration. */
-export const ENTITIES = [Transaction, AuditLog];
+export const ENTITIES = [Transaction, AuditLog, AnchorBatch];
 
 @Module({
   imports: [

@@ -9,9 +9,18 @@
 type Rule = {
   key: string;
   required?: boolean;
-  kind?: 'string' | 'int' | 'float' | 'boolean' | 'url' | 'enum';
+  kind?: 'string' | 'int' | 'float' | 'boolean' | 'url' | 'enum' | 'pattern';
   values?: string[];
   min?: number;
+  pattern?: RegExp;
+  /** Description du format attendu, pour les regles `pattern`. */
+  expected?: string;
+  /**
+   * Interdit de faire figurer la valeur dans le message d'erreur.
+   * Un message de demarrage se retrouve dans les journaux et les tickets :
+   * une cle privee ne doit jamais y transiter.
+   */
+  secret?: boolean;
 };
 
 const RULES: Rule[] = [
@@ -36,6 +45,27 @@ const RULES: Rule[] = [
   { key: 'AUDIT_MAX_PAYLOAD_CHARS', kind: 'int', min: 0 },
   { key: 'AUDIT_PERSIST_PAYLOADS', kind: 'boolean' },
   { key: 'SWAGGER_ENABLED', kind: 'boolean' },
+
+  { key: 'BLOCKCHAIN_ENABLED', kind: 'boolean' },
+  { key: 'BLOCKCHAIN_RPC_URL', kind: 'url' },
+  { key: 'BLOCKCHAIN_CHAIN_ID', kind: 'int', min: 1 },
+  {
+    key: 'BLOCKCHAIN_CONTRACT_ADDRESS',
+    kind: 'pattern',
+    pattern: /^0x[0-9a-fA-F]{40}$/,
+    expected: 'une adresse Ethereum (0x + 40 caracteres hexadecimaux)',
+  },
+  {
+    key: 'BLOCKCHAIN_PRIVATE_KEY',
+    kind: 'pattern',
+    pattern: /^0x[0-9a-fA-F]{64}$/,
+    expected: 'une cle privee (0x + 64 caracteres hexadecimaux)',
+    secret: true,
+  },
+  { key: 'BLOCKCHAIN_CONFIRMATIONS', kind: 'int', min: 0 },
+  { key: 'ANCHOR_BATCH_MAX_SIZE', kind: 'int', min: 1 },
+  { key: 'ANCHOR_INTERVAL_MS', kind: 'int', min: 1000 },
+  { key: 'ANCHOR_MAX_RETRIES', kind: 'int', min: 1 },
 ];
 
 const BOOLEANS = ['1', '0', 'true', 'false', 'yes', 'no', 'on', 'off'];
@@ -43,6 +73,15 @@ const BOOLEANS = ['1', '0', 'true', 'false', 'yes', 'no', 'on', 'off'];
 function checkRule(rule: Rule, raw: string | undefined): string | null {
   if (raw === undefined || raw === '') {
     return rule.required ? `${rule.key} est requis mais absent` : null;
+  }
+
+  if (rule.kind === 'pattern') {
+    if (rule.pattern?.test(raw)) return null;
+    // Sur une variable sensible, on decrit le format attendu sans jamais
+    // reproduire la valeur fournie.
+    return rule.secret
+      ? `${rule.key} doit etre ${rule.expected ?? 'au format attendu'} (valeur masquee)`
+      : `${rule.key} doit etre ${rule.expected ?? 'au format attendu'} (recu: "${raw}")`;
   }
 
   switch (rule.kind) {

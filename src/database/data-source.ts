@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
 import { AuditLog } from '../audit/entities/audit-log.entity';
+import { AnchorBatch } from '../blockchain/entities/anchor-batch.entity';
 import { Transaction } from '../transactions/entities/transaction.entity';
 
 loadEnv();
@@ -19,7 +20,7 @@ export default new DataSource({
   username: process.env.DB_USERNAME ?? 'banking',
   password: process.env.DB_PASSWORD ?? 'banking',
   database: process.env.DB_NAME ?? 'banking_soap',
-  entities: [Transaction, AuditLog],
+  entities: [Transaction, AuditLog, AnchorBatch],
   migrations: ['src/database/migrations/*.ts'],
   synchronize: false,
   logging: false,

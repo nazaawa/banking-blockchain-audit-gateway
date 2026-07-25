@@ -7,6 +7,7 @@ import {
   UpdateDateColumn,
   VersionColumn,
 } from 'typeorm';
+import { AnchorStatus } from '../../blockchain/enums/anchor-status.enum';
 import { TransactionStatus } from '../enums/transaction-status.enum';
 
 /**
@@ -101,6 +102,55 @@ export class Transaction {
 
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
+
+  // ---------------------------------------------------------------------------
+  // Scellement cryptographique et ancrage blockchain
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Empreinte du document XML scelle : `keccak256(sel ‖ TransferRecord)`.
+   * Calculee une seule fois, quand la transaction atteint un etat terminal.
+   */
+  @Column({ name: 'fingerprint', type: 'varchar', length: 66, nullable: true })
+  fingerprint!: string | null;
+
+  /**
+   * Sel aleatoire de 32 octets, propre a cette transaction.
+   *
+   * Sans lui, l'empreinte publiee serait attaquable par force brute : un IBAN
+   * suit un format public et un montant se devine. Le sel ne quitte jamais la
+   * base — il est necessaire a la verification, jamais a la publication.
+   */
+  @Column({ name: 'fingerprint_salt', type: 'varchar', length: 66, nullable: true })
+  fingerprintSalt!: string | null;
+
+  /** Version du format de serialisation ayant produit l'empreinte. */
+  @Column({ name: 'record_format_version', type: 'varchar', length: 8, nullable: true })
+  recordFormatVersion!: string | null;
+
+  @Column({ name: 'sealed_at', type: 'timestamptz', nullable: true })
+  sealedAt!: Date | null;
+
+  @Index('idx_transactions_anchor_status')
+  @Column({
+    name: 'anchor_status',
+    type: 'enum',
+    enum: AnchorStatus,
+    default: AnchorStatus.NOT_SEALED,
+  })
+  anchorStatus!: AnchorStatus;
+
+  /** Lot d'ancrage auquel la transaction a ete rattachee. */
+  @Column({ name: 'batch_id', type: 'uuid', nullable: true })
+  batchId!: string | null;
+
+  /** Position de la feuille dans l'arbre du lot : sans elle, la preuve est inverifiable. */
+  @Column({ name: 'leaf_index', type: 'int', nullable: true })
+  leafIndex!: number | null;
+
+  /** Chemin de hashs freres, de la feuille vers la racine. */
+  @Column({ name: 'merkle_proof', type: 'jsonb', nullable: true })
+  merkleProof!: string[] | null;
 
   /** Verrouillage optimiste : protege contre les mises a jour concurrentes. */
   @VersionColumn()

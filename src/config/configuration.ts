@@ -79,4 +79,40 @@ export const auditConfig = registerAs('audit', () => ({
   persistPayloads: toBool(process.env.AUDIT_PERSIST_PAYLOADS, true),
 }));
 
-export const configurations = [appConfig, databaseConfig, soapConfig, businessConfig, auditConfig];
+/**
+ * Cle privee du compte #0 d'Anvil et du noeud Hardhat.
+ *
+ * Publique par construction et sans valeur hors d'une chaine locale jetable.
+ * En production, cette cle proviendrait d'un HSM ou d'un KMS, jamais d'une
+ * variable d'environnement — voir la section « Limites » du README.
+ */
+const LOCAL_DEV_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+
+export const blockchainConfig = registerAs('blockchain', () => ({
+  enabled: toBool(process.env.BLOCKCHAIN_ENABLED, true),
+  rpcUrl: process.env.BLOCKCHAIN_RPC_URL ?? 'http://127.0.0.1:8545',
+  chainId: toInt(process.env.BLOCKCHAIN_CHAIN_ID, 31337),
+  contractAddress: process.env.BLOCKCHAIN_CONTRACT_ADDRESS ?? '',
+  privateKey: process.env.BLOCKCHAIN_PRIVATE_KEY ?? LOCAL_DEV_PRIVATE_KEY,
+  /** Confirmations attendues avant de considerer l'ancrage acquis. */
+  confirmations: toInt(process.env.BLOCKCHAIN_CONFIRMATIONS, 1),
+}));
+
+export const anchorConfig = registerAs('anchor', () => ({
+  /** Nombre maximum de transactions regroupees dans un lot. */
+  batchMaxSize: toInt(process.env.ANCHOR_BATCH_MAX_SIZE, 50),
+  /** Periode de constitution des lots, en millisecondes. */
+  intervalMs: toInt(process.env.ANCHOR_INTERVAL_MS, 15_000),
+  /** Reprises avant d'abandonner definitivement un lot. */
+  maxRetries: toInt(process.env.ANCHOR_MAX_RETRIES, 3),
+}));
+
+export const configurations = [
+  appConfig,
+  databaseConfig,
+  soapConfig,
+  businessConfig,
+  auditConfig,
+  blockchainConfig,
+  anchorConfig,
+];
