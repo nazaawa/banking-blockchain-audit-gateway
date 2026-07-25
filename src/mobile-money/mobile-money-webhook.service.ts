@@ -17,6 +17,7 @@ import { mobileMoneyConfig } from '../config/configuration';
 import { SoapCommunicationException, SoapFaultException } from '../soap/exceptions/soap.exceptions';
 import { SoapClientService } from '../soap/soap-client.service';
 import { Transaction } from '../transactions/entities/transaction.entity';
+import { MetricsService } from '../observability/metrics.service';
 import { stateOf, TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import type { TransactionState } from '../transactions/state/transaction-state';
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
@@ -57,6 +58,7 @@ export class MobileMoneyWebhookService {
     private readonly reconciliation: ReconciliationService,
     private readonly eventLedger: TransactionEventsService,
     private readonly stateMachine: TransactionStateMachine,
+    private readonly metrics: MetricsService,
     @InjectDataSource()
     private readonly dataSource: DataSource,
     @Inject(mobileMoneyConfig.KEY)
@@ -249,6 +251,14 @@ export class MobileMoneyWebhookService {
     }
 
     const { amountInWords, exchange } = bankResult;
+
+    // Mesure prise chez l'appelant, non dans le client : c'est la duree que la
+    // passerelle a reellement subie, et c'est le seul endroit observable quand
+    // le client est bouchonne.
+    this.metrics.soapDuration.observe(
+      { operation: exchange.operation, outcome: 'success' },
+      exchange.durationMs / 1000,
+    );
     await this.auditService.record({
       direction: AuditDirection.OUTBOUND_REQUEST,
       outcome: AuditOutcome.SUCCESS,

@@ -31,6 +31,7 @@ import { Transaction } from './entities/transaction.entity';
 import { TransactionStatus } from './enums/transaction-status.enum';
 import { ReferenceGenerator } from './reference.generator';
 import { TransactionsRepository } from './transactions.repository';
+import { MetricsService } from '../observability/metrics.service';
 import { stateOf, TransactionStateMachine } from './state/transaction-state.machine';
 import type { TransactionState } from './state/transaction-state';
 import { TransactionEventsService } from '../events/transaction-events.service';
@@ -65,6 +66,7 @@ export class TransactionsService {
     private readonly xsdValidator: XsdValidatorService,
     private readonly events: TransactionEventsService,
     private readonly stateMachine: TransactionStateMachine,
+    private readonly metrics: MetricsService,
     @Inject(businessConfig.KEY)
     private readonly config: ConfigType<typeof businessConfig>,
     @InjectDataSource()
@@ -332,6 +334,11 @@ export class TransactionsService {
     try {
       const { amountInWords, exchange } = await this.soapClient.convertAmountToWords(
         transaction.amount,
+      );
+
+      this.metrics.soapDuration.observe(
+        { operation: exchange.operation, outcome: 'success' },
+        exchange.durationMs / 1000,
       );
 
       await this.auditService.record({

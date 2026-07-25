@@ -24,6 +24,7 @@ import { Transaction } from './entities/transaction.entity';
 import { TransactionStatus } from './enums/transaction-status.enum';
 import { ReferenceGenerator } from './reference.generator';
 import { TransactionsRepository } from './transactions.repository';
+import { MetricsService } from '../observability/metrics.service';
 import { TransactionStateMachine } from './state/transaction-state.machine';
 import { TransactionsService } from './transactions.service';
 import { TransactionEventsService } from '../events/transaction-events.service';
@@ -117,6 +118,10 @@ describe('TransactionsService', () => {
         { provide: AuditService, useValue: auditService },
         { provide: TransactionEventsService, useValue: eventLedger },
         TransactionStateMachine,
+        {
+          provide: MetricsService,
+          useValue: { soapDuration: { observe: jest.fn() } },
+        },
         { provide: getDataSourceToken(), useValue: dataSource },
         {
           provide: businessConfig.KEY,

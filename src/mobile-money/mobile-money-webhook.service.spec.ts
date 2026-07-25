@@ -13,6 +13,7 @@ import {
   ReconciliationStatus,
 } from './enums/mobile-money.enum';
 import { MobileMoneyService } from './mobile-money.service';
+import type { MetricsService } from '../observability/metrics.service';
 import { TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import { MobileMoneyWebhookService } from './mobile-money-webhook.service';
 import { ReconciliationService } from './reconciliation.service';
@@ -120,6 +121,7 @@ describe('MobileMoneyWebhookService', () => {
       reconciliation,
       eventLedger,
       new TransactionStateMachine(),
+      { soapDuration: { observe: jest.fn() } } as unknown as MetricsService,
       dataSource,
       { webhookSecret: 'test-secret' } as never,
     );
