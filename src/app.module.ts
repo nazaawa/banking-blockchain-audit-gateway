@@ -10,6 +10,8 @@ import { validateEnv } from './config/env.validation';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { SoapModule } from './soap/soap.module';
+import { XmlModule } from './xml/xml.module';
+import { BlockchainModule } from './blockchain/blockchain.module';
 import { TransactionsModule } from './transactions/transactions.module';
 
 @Module({
@@ -23,6 +25,8 @@ import { TransactionsModule } from './transactions/transactions.module';
     }),
     DatabaseModule,
     SoapModule,
+    XmlModule,
+    BlockchainModule,
     AuditModule,
     TransactionsModule,
     HealthModule,

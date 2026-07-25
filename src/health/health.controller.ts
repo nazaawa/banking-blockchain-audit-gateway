@@ -1,4 +1,5 @@
-import { Controller, Get, HttpCode, HttpStatus, Res } from '@nestjs/common';
+import { Controller, Get, HttpCode, HttpStatus, Inject, Res } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import {
   ApiOkResponse,
   ApiOperation,
@@ -9,6 +10,9 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import type { Response } from 'express';
 import { DataSource } from 'typeorm';
 import { SoapClientService } from '../soap/soap-client.service';
+import { XsdValidatorService } from '../xml/xsd-validator.service';
+import { EvmAnchorClient } from '../blockchain/evm-anchor.client';
+import { blockchainConfig } from '../config/configuration';
 
 type ComponentStatus = 'up' | 'down';
 
@@ -19,6 +23,8 @@ interface HealthReport {
   components: {
     database: { status: ComponentStatus; latencyMs?: number; error?: string };
     soapClient: { status: ComponentStatus };
+    xsdSchemas: { status: ComponentStatus };
+    blockchain: { status: ComponentStatus; enabled: boolean; contractAddress?: string };
   };
 }
 
@@ -29,6 +35,10 @@ export class HealthController {
     @InjectDataSource()
     private readonly dataSource: DataSource,
     private readonly soapClient: SoapClientService,
+    private readonly xsdValidator: XsdValidatorService,
+    private readonly anchorClient: EvmAnchorClient,
+    @Inject(blockchainConfig.KEY)
+    private readonly chain: ConfigType<typeof blockchainConfig>,
   ) {}
 
   @Get()
@@ -42,12 +52,23 @@ export class HealthController {
   @ApiOkResponse({ description: 'Tous les composants repondent' })
   @ApiServiceUnavailableResponse({ description: 'Au moins un composant est indisponible' })
   async check(@Res({ passthrough: true }) response: Response): Promise<HealthReport> {
-    const [database, soapClient] = await Promise.all([
+    const [database, soapClient, blockchain] = await Promise.all([
       this.checkDatabase(),
       this.checkSoapClient(),
+      this.checkBlockchain(),
     ]);
 
-    const healthy = database.status === 'up' && soapClient.status === 'up';
+    const xsdSchemas: { status: ComponentStatus } = {
+      status: this.xsdValidator.isReady() ? 'up' : 'down',
+    };
+
+    // L'ancrage desactive n'est pas une panne : c'est un mode d'exploitation
+    // assume, ou les transactions restent scellees sans etre publiees.
+    const healthy =
+      database.status === 'up' &&
+      soapClient.status === 'up' &&
+      xsdSchemas.status === 'up' &&
+      (!blockchain.enabled || blockchain.status === 'up');
 
     if (!healthy) {
       response.status(HttpStatus.SERVICE_UNAVAILABLE);
@@ -57,7 +78,18 @@ export class HealthController {
       status: healthy ? 'ok' : 'degraded',
       uptimeSeconds: Math.round(process.uptime()),
       timestamp: new Date().toISOString(),
-      components: { database, soapClient },
+      components: { database, soapClient, xsdSchemas, blockchain },
+    };
+  }
+
+  /** Verifie que le noeud repond et que le contrat d ancrage est bien deploye. */
+  private async checkBlockchain(): Promise<HealthReport['components']['blockchain']> {
+    if (!this.chain.enabled) return { status: 'up', enabled: false };
+
+    return {
+      status: (await this.anchorClient.isReady()) ? 'up' : 'down',
+      enabled: true,
+      contractAddress: this.chain.contractAddress,
     };
   }
 
