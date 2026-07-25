@@ -1,5 +1,11 @@
 import { registerAs } from '@nestjs/config';
 import { join } from 'node:path';
+import {
+  DEFAULT_SECURITY_KEY_SALT,
+  LOCAL_SECURITY_KEY_ID,
+  LOCAL_SECURITY_MASTER_KEY,
+  parsePreviousKeys,
+} from '../security/key-derivation';
 
 const toBool = (value: string | undefined, fallback = false): boolean => {
   if (value === undefined || value === '') return fallback;
@@ -118,8 +124,10 @@ const LOCAL_DEV_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5ef
  * usage, afin qu'une compromission n'en livre pas d'autres.
  */
 export const securityConfig = registerAs('security', () => ({
-  masterKey: process.env.SECURITY_MASTER_KEY ?? 'local-demo-master-key-a-remplacer',
-  keySalt: process.env.SECURITY_KEY_SALT ?? 'banking-gateway-hkdf-salt',
+  currentKeyId: process.env.SECURITY_CURRENT_KEY_ID ?? LOCAL_SECURITY_KEY_ID,
+  masterKey: process.env.SECURITY_MASTER_KEY ?? LOCAL_SECURITY_MASTER_KEY,
+  keySalt: process.env.SECURITY_KEY_SALT ?? DEFAULT_SECURITY_KEY_SALT,
+  previousKeys: parsePreviousKeys(process.env.SECURITY_PREVIOUS_KEYS ?? ''),
 }));
 
 export const blockchainConfig = registerAs('blockchain', () => ({

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { encryptedColumn } from '../../security/field-cipher';
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -8,7 +9,6 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
-  Check,
   Unique,
 } from 'typeorm';
 import { AnchorBatch } from '../../blockchain/entities/anchor-batch.entity';
@@ -62,6 +62,23 @@ const numericTransformer = {
   'CHK_transaction_events_parties',
   `("event_type" IN ('TRANSFER_INITIATED', 'PAYMENT_INITIATED') AND (("record_format_version" = '1.0' AND "debtor_iban" IS NULL AND "debtor_name" IS NULL AND "creditor_iban" IS NULL AND "creditor_name" IS NULL AND "end_to_end_label" IS NULL) OR ("debtor_iban" IS NOT NULL AND "creditor_iban" IS NOT NULL AND "creditor_name" IS NOT NULL))) OR ("event_type" NOT IN ('TRANSFER_INITIATED', 'PAYMENT_INITIATED') AND "debtor_iban" IS NULL AND "debtor_name" IS NULL AND "creditor_iban" IS NULL AND "creditor_name" IS NULL AND "end_to_end_label" IS NULL)`,
 )
+@Check(
+  'CHK_transaction_events_debtor_iban_encrypted',
+  `"debtor_iban" IS NULL OR "debtor_iban" ~ '^enc\\.v1\\.[A-Za-z0-9_-]{1,32}\\.[A-Za-z0-9_-]+$'`,
+)
+@Check(
+  'CHK_transaction_events_debtor_name_encrypted',
+  `"debtor_name" IS NULL OR "debtor_name" ~ '^enc\\.v1\\.[A-Za-z0-9_-]{1,32}\\.[A-Za-z0-9_-]+$'`,
+)
+@Check(
+  'CHK_transaction_events_creditor_iban_encrypted',
+  `"creditor_iban" IS NULL OR "creditor_iban" ~ '^enc\\.v1\\.[A-Za-z0-9_-]{1,32}\\.[A-Za-z0-9_-]+$'`,
+)
+@Check(
+  'CHK_transaction_events_creditor_name_encrypted',
+  `"creditor_name" IS NULL OR "creditor_name" ~ '^enc\\.v1\\.[A-Za-z0-9_-]{1,32}\\.[A-Za-z0-9_-]+$'`,
+)
+@Check('CHK_transaction_events_encryption_version', `"encryption_version" = 1`)
 @Entity('transaction_events')
 @Unique('uq_transaction_events_sequence', ['transactionReference', 'sequence'])
 @Index('idx_transaction_events_reference', ['transactionReference'])
@@ -76,6 +93,10 @@ export class TransactionEvent {
   @ApiProperty({ format: 'uuid' })
   @PrimaryGeneratedColumn('uuid')
   id!: string;
+
+  /** Version explicite du format de chiffrement persiste. */
+  @Column({ name: 'encryption_version', type: 'smallint', default: 1 })
+  encryptionVersion!: number;
 
   @ApiProperty({ enum: TransactionEventType })
   @Column({ name: 'event_type', type: 'enum', enum: TransactionEventType })

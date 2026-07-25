@@ -30,11 +30,14 @@ export class SecurityModule implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    FieldCipher.useKey(await this.custody.getDataEncryptionKey());
+    const keyRing = await this.custody.getDataEncryptionKeyRing();
+    FieldCipher.useKeyRing(keyRing.currentKeyId, keyRing.keys);
     this.logger.log({
       event: 'field-cipher.ready',
       custody: this.custody.custodyName,
       algorithm: 'aes-256-gcm',
+      currentKeyId: keyRing.currentKeyId,
+      readableKeys: keyRing.keys.size,
     });
   }
 }

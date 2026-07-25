@@ -18,7 +18,10 @@ process.env.ALLOWED_CURRENCIES = 'EUR,USD,GBP';
 process.env.TRANSFER_MAX_AMOUNT = '1000000';
 process.env.AUDIT_PERSIST_PAYLOADS = 'true';
 process.env.AUDIT_MAX_PAYLOAD_CHARS = '8000';
-process.env.SECURITY_MASTER_KEY = 'e2e-master-key-dedicated-32-characters-minimum';
+process.env.SECURITY_CURRENT_KEY_ID = 'e2e-v1';
+process.env.SECURITY_MASTER_KEY = Buffer.from(
+  Array.from({ length: 32 }, (_, index) => index + 1),
+).toString('base64');
 process.env.SECURITY_KEY_SALT = 'e2e-hkdf-salt-stable';
 
 /**

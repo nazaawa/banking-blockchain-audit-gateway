@@ -26,6 +26,10 @@ export type SerializableEvent = Omit<
   | 'leafIndex'
   | 'merkleProof'
   | 'createdAt'
+  // Metadonnee de persistance : le format de chiffrement decrit comment la
+  // ligne est stockee, pas ce qui s'est produit. L'inclure ferait dependre une
+  // empreinte metier d'un detail d'infrastructure.
+  | 'encryptionVersion'
 > & { id: string; recordFormatVersion?: string };
 
 /**

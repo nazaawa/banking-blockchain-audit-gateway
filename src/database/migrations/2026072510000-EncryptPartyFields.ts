@@ -5,17 +5,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * ## Ce que la migration fait, et ne fait pas
  *
- * Elle **elargit** les colonnes : un IBAN tient dans 34 caracteres, son chiffre
- * en base64url dans environ 90. Elle ne convertit **aucune** donnee existante.
- *
- * Les lignes anterieures restent en clair et sont lues telles quelles — le
- * chiffre porte un prefixe de version qui les distingue. Toute ecriture chiffre,
- * y compris la reecriture d'une ligne heritee.
- *
- * Convertir en masse supposerait de disposer de la cle au moment de la
- * migration, donc de la faire transiter par l'outillage de schema. Le gain — des
- * lignes de demonstration chiffrees — ne justifie pas d'elargir la surface
- * d'exposition du secret.
+ * Elle elargit les colonnes pour accueillir le chiffre. La migration suivante
+ * convertit les lignes historiques et interdit ensuite tout retour au clair.
  *
  * ## Pourquoi les empreintes ne bougent pas
  *

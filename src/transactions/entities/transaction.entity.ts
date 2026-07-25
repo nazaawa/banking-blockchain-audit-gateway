@@ -71,6 +71,23 @@ const numericTransformer = {
   'CHK_transactions_blocked_bank_needs_gap',
   `"bank_status"::text <> 'BLOCKED' OR "reconciliation_status"::text IN ('AMOUNT_MISMATCH', 'CURRENCY_MISMATCH')`,
 )
+@Check(
+  'CHK_transactions_debtor_iban_encrypted',
+  `"debtor_iban" IS NULL OR "debtor_iban" ~ '^enc\\.v1\\.[A-Za-z0-9_-]{1,32}\\.[A-Za-z0-9_-]+$'`,
+)
+@Check(
+  'CHK_transactions_debtor_name_encrypted',
+  `"debtor_name" IS NULL OR "debtor_name" ~ '^enc\\.v1\\.[A-Za-z0-9_-]{1,32}\\.[A-Za-z0-9_-]+$'`,
+)
+@Check(
+  'CHK_transactions_creditor_iban_encrypted',
+  `"creditor_iban" IS NULL OR "creditor_iban" ~ '^enc\\.v1\\.[A-Za-z0-9_-]{1,32}\\.[A-Za-z0-9_-]+$'`,
+)
+@Check(
+  'CHK_transactions_creditor_name_encrypted',
+  `"creditor_name" IS NULL OR "creditor_name" ~ '^enc\\.v1\\.[A-Za-z0-9_-]{1,32}\\.[A-Za-z0-9_-]+$'`,
+)
+@Check('CHK_transactions_encryption_version', `"encryption_version" = 1`)
 @Entity('transactions')
 @Index('idx_transactions_status', ['status'])
 @Index('idx_transactions_created_at', ['createdAt'])
@@ -78,6 +95,10 @@ const numericTransformer = {
 export class Transaction {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
+
+  /** Version du format chiffre persiste ; aucune ligne en clair n'est admise en v1. */
+  @Column({ name: 'encryption_version', type: 'smallint', default: 1 })
+  encryptionVersion!: number;
 
   /** Reference fonctionnelle unique exposee au client (`TRF-YYYYMMDD-XXXXXXXX`). */
   @Column({ type: 'varchar', length: 32, unique: true })

@@ -1,12 +1,9 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
-import { hkdfSync } from 'node:crypto';
 import { NonceManager, Wallet, type Signer } from 'ethers';
 import { blockchainConfig, securityConfig } from '../config/configuration';
-import type { KeyCustodyPort } from './key-custody.port';
-
-/** Longueur d'une cle AES-256. */
-const DATA_KEY_BYTES = 32;
+import type { DataEncryptionKeyRing, KeyCustodyPort } from './key-custody.port';
+import { decodeMasterKey, deriveDataEncryptionKey } from './key-derivation';
 
 /**
  * Garde locale : les secrets vivent dans la configuration du processus.
@@ -29,7 +26,7 @@ export class EnvKeyCustodyAdapter implements KeyCustodyPort, OnModuleInit {
   readonly custodyName = 'environnement local';
 
   private readonly logger = new Logger(EnvKeyCustodyAdapter.name);
-  private dataKey?: Buffer;
+  private dataKeyRing?: DataEncryptionKeyRing;
 
   constructor(
     @Inject(blockchainConfig.KEY)
@@ -65,18 +62,23 @@ export class EnvKeyCustodyAdapter implements KeyCustodyPort, OnModuleInit {
     return Promise.resolve(new Wallet(this.blockchain.privateKey).address);
   }
 
-  getDataEncryptionKey(): Promise<Buffer> {
+  getDataEncryptionKeyRing(): Promise<DataEncryptionKeyRing> {
     // Derivee une fois : un KMS reel facturerait et ralentirait chaque appel,
     // et la cle vit de toute facon en memoire le temps du service.
-    this.dataKey ??= Buffer.from(
-      hkdfSync(
-        'sha256',
-        this.security.masterKey,
-        this.security.keySalt,
-        'iban-at-rest',
-        DATA_KEY_BYTES,
-      ),
-    );
-    return Promise.resolve(this.dataKey);
+    if (!this.dataKeyRing) {
+      const keys = new Map<string, Buffer>();
+      keys.set(
+        this.security.currentKeyId,
+        deriveDataEncryptionKey(decodeMasterKey(this.security.masterKey), this.security.keySalt),
+      );
+      for (const previous of this.security.previousKeys) {
+        keys.set(
+          previous.keyId,
+          deriveDataEncryptionKey(decodeMasterKey(previous.masterKey), this.security.keySalt),
+        );
+      }
+      this.dataKeyRing = { currentKeyId: this.security.currentKeyId, keys };
+    }
+    return Promise.resolve(this.dataKeyRing);
   }
 }

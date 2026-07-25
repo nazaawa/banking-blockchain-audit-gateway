@@ -6,7 +6,8 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
  * Il remplit deux roles : distinguer un chiffre d'un clair herite, et permettre
  * une rotation d'algorithme sans ambiguite sur les donnees deja ecrites.
  */
-const PREFIX = 'enc.v1.';
+const PREFIX = 'enc.v1';
+const KEY_ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
@@ -28,37 +29,55 @@ const TAG_BYTES = 16;
  * existe pour empecher : une base qu'on croit protegee et qui ne l'est pas.
  * Mieux vaut un service qui refuse d'ecrire qu'un service qui ment.
  *
- * ## Le clair herite est tolere en lecture
- *
- * Les lignes anterieures au chiffrement ne portent pas de prefixe et sont
- * rendues telles quelles. Toute **ecriture** chiffre, y compris la reecriture
- * d'une ligne heritee. C'est un residu assume, non une porte laissee ouverte.
+ * Toute valeur persistante doit porter le prefixe de version. Les donnees
+ * historiques sont converties par migration, puis des contraintes PostgreSQL
+ * interdisent leur retour au clair.
  */
 export class FieldCipher {
-  private static key: Buffer | null = null;
+  private static currentKeyId: string | null = null;
+  private static keys = new Map<string, Buffer>();
 
-  /** Installe la cle resolue par la garde. Appele une fois, au demarrage. */
+  /** Compatibilite des tests simples : installe une cle unique. */
   static useKey(key: Buffer): void {
-    if (key.length !== 32) {
-      throw new Error(`Cle de chiffrement invalide : ${key.length} octets au lieu de 32`);
+    FieldCipher.useKeyRing('test', new Map([['test', key]]));
+  }
+
+  /** Installe la cle courante et les anciennes cles disponibles en lecture. */
+  static useKeyRing(currentKeyId: string, keys: ReadonlyMap<string, Buffer>): void {
+    if (!KEY_ID_PATTERN.test(currentKeyId)) {
+      throw new Error(`Identifiant de cle invalide : ${currentKeyId}`);
     }
-    FieldCipher.key = key;
+    if (!keys.has(currentKeyId)) {
+      throw new Error(`Cle courante absente du keyring : ${currentKeyId}`);
+    }
+    for (const [keyId, key] of keys) {
+      if (!KEY_ID_PATTERN.test(keyId)) {
+        throw new Error(`Identifiant de cle invalide : ${keyId}`);
+      }
+      if (key.length !== 32) {
+        throw new Error(`Cle ${keyId} invalide : ${key.length} octets au lieu de 32`);
+      }
+    }
+    FieldCipher.currentKeyId = currentKeyId;
+    FieldCipher.keys = new Map(keys);
   }
 
   /** Uniquement pour les tests : rend le chiffrement de nouveau indisponible. */
   static forgetKey(): void {
-    FieldCipher.key = null;
+    FieldCipher.currentKeyId = null;
+    FieldCipher.keys.clear();
   }
 
   static get ready(): boolean {
-    return FieldCipher.key !== null;
+    return FieldCipher.currentKeyId !== null;
   }
 
   static encrypt(value: string | null, context = ''): string | null {
     if (value === null || value === undefined) return null;
 
-    const key = FieldCipher.key;
-    if (!key) {
+    const keyId = FieldCipher.currentKeyId;
+    const key = keyId ? FieldCipher.keys.get(keyId) : undefined;
+    if (!keyId || !key) {
       throw new Error(
         'Chiffrement indisponible : aucune cle installee. ' +
           'Ecrire en clair reviendrait a croire la base protegee sans qu elle le soit.',
@@ -70,20 +89,28 @@ export class FieldCipher {
     cipher.setAAD(Buffer.from(context, 'utf8'));
     const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
 
-    return PREFIX + Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url');
+    return (
+      `${PREFIX}.${keyId}.` +
+      Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64url')
+    );
   }
 
   static decrypt(stored: string | null, context = ''): string | null {
     if (stored === null || stored === undefined) return null;
-    // Ligne anterieure au chiffrement : rendue telle quelle.
-    if (!stored.startsWith(PREFIX)) return stored;
-
-    const key = FieldCipher.key;
-    if (!key) {
-      throw new Error('Dechiffrement impossible : aucune cle installee');
+    const match = /^enc\.v1\.([A-Za-z0-9_-]{1,32})\.([A-Za-z0-9_-]+)$/.exec(stored);
+    if (!match) {
+      throw new Error(
+        'Valeur sensible non chiffree refusee : un retour au clair constituerait un downgrade',
+      );
     }
 
-    const raw = Buffer.from(stored.slice(PREFIX.length), 'base64url');
+    const [, keyId, payload] = match;
+    const key = FieldCipher.keys.get(keyId);
+    if (!key) {
+      throw new Error(`Dechiffrement impossible : cle ${keyId} absente du keyring`);
+    }
+
+    const raw = Buffer.from(payload, 'base64url');
     if (raw.length < IV_BYTES + TAG_BYTES) {
       throw new Error('Valeur chiffree invalide : charge utile tronquee');
     }
@@ -98,6 +125,29 @@ export class FieldCipher {
     decipher.setAuthTag(tag);
 
     return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  }
+
+  /**
+   * Lit exclusivement l'ancien format local `enc.v1.<payload>`.
+   *
+   * Reserve a la migration vers le keyring. Le chemin applicatif normal ne
+   * l'accepte jamais, afin de ne pas recreer un downgrade sans identifiant.
+   */
+  static decryptLegacyV1(stored: string, context: string, legacyKey: Buffer): string {
+    const match = /^enc\.v1\.([A-Za-z0-9_-]+)$/.exec(stored);
+    if (!match || legacyKey.length !== 32) throw new Error('Ancien chiffre v1 illisible');
+
+    const raw = Buffer.from(match[1], 'base64url');
+    if (raw.length < IV_BYTES + TAG_BYTES) {
+      throw new Error('Valeur chiffree invalide : charge utile tronquee');
+    }
+    const decipher = createDecipheriv('aes-256-gcm', legacyKey, raw.subarray(0, IV_BYTES));
+    decipher.setAAD(Buffer.from(context, 'utf8'));
+    decipher.setAuthTag(raw.subarray(IV_BYTES, IV_BYTES + TAG_BYTES));
+    return Buffer.concat([
+      decipher.update(raw.subarray(IV_BYTES + TAG_BYTES)),
+      decipher.final(),
+    ]).toString('utf8');
   }
 }
 

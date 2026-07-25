@@ -13,6 +13,7 @@ import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter
 import { SoapClientService } from '../src/soap/soap-client.service';
 import type { AmountInWordsResult } from '../src/soap/soap.types';
 import { TransactionEvent } from '../src/events/entities/transaction-event.entity';
+import { FieldCipher } from '../src/security/field-cipher';
 import { E2E_AUTHORIZATION } from './setup-e2e';
 
 const DEBTOR_IBAN = 'FR7630006000011234567890189';
@@ -161,13 +162,15 @@ describe('Integrite des donnees de paiement (e2e)', () => {
       const reference = await createTransfer();
 
       const [opening] = await dataSource.query<Array<Record<string, string>>>(
-        'SELECT event_type, record_format_version, debtor_iban, creditor_iban, creditor_name ' +
+        'SELECT event_type, record_format_version, encryption_version, ' +
+          'debtor_iban, creditor_iban, creditor_name ' +
           'FROM transaction_events WHERE transaction_reference = $1 ORDER BY sequence LIMIT 1',
         [reference],
       );
 
       expect(opening.event_type).toBe('TRANSFER_INITIATED');
       expect(opening.record_format_version).toBe('2.0');
+      expect(Number(opening.encryption_version)).toBe(1);
 
       // Lecture SQL brute : la base ne contient que du chiffre. C'est la seule
       // maniere de le prouver — l'entite dechiffre de maniere transparente, donc
@@ -178,9 +181,11 @@ describe('Integrite des donnees de paiement (e2e)', () => {
       expect(opening.creditor_iban).not.toContain(CREDITOR_IBAN);
 
       const [storedTransaction] = await dataSource.query<Array<Record<string, string>>>(
-        'SELECT debtor_iban, creditor_iban, creditor_name FROM transactions WHERE reference = $1',
+        'SELECT encryption_version, debtor_iban, creditor_iban, creditor_name ' +
+          'FROM transactions WHERE reference = $1',
         [reference],
       );
+      expect(Number(storedTransaction.encryption_version)).toBe(1);
       expect(storedTransaction.debtor_iban).toMatch(/^enc\.v1\./);
       expect(storedTransaction.creditor_iban).toMatch(/^enc\.v1\./);
       expect(storedTransaction.creditor_name).toMatch(/^enc\.v1\./);
@@ -195,6 +200,25 @@ describe('Integrite des donnees de paiement (e2e)', () => {
       expect(decrypted.debtorIban).toBe(DEBTOR_IBAN);
       expect(decrypted.creditorIban).toBe(CREDITOR_IBAN);
       expect(decrypted.creditorName).toBe('ACME GmbH');
+    });
+
+    it('REFUSE un retour SQL vers une valeur en clair', async () => {
+      const reference = await createTransfer();
+
+      await expect(
+        dataSource.query(
+          `UPDATE transactions
+           SET creditor_iban = $1, encryption_version = 0
+           WHERE reference = $2`,
+          ['DE89370400440532013000', reference],
+        ),
+      ).rejects.toThrow(/CHK_transactions_(creditor_iban_encrypted|encryption_version)/);
+
+      const [stored] = await dataSource.query<Array<{ creditor_iban: string }>>(
+        'SELECT creditor_iban FROM transactions WHERE reference = $1',
+        [reference],
+      );
+      expect(stored.creditor_iban).toMatch(/^enc\.v1\./);
     });
 
     it('conserve les empreintes verifiables malgre le chiffrement', async () => {
@@ -269,8 +293,11 @@ describe('Integrite des donnees de paiement (e2e)', () => {
       const reference = await createTransfer();
       await anchorService.processPendingBatch();
 
+      const storedValue = ['creditor_iban', 'creditor_name', 'debtor_iban'].includes(colonne)
+        ? FieldCipher.encrypt(valeur, `transactions.${colonne}`)
+        : valeur;
       await dataSource.query(`UPDATE transactions SET ${colonne} = $1 WHERE reference = $2`, [
-        valeur,
+        storedValue,
         reference,
       ]);
 
@@ -283,7 +310,7 @@ describe('Integrite des donnees de paiement (e2e)', () => {
     it('nomme le champ altere pour orienter l enquete', async () => {
       const reference = await createTransfer();
       await dataSource.query('UPDATE transactions SET creditor_iban = $1 WHERE reference = $2', [
-        'GB82WEST12345698765432',
+        FieldCipher.encrypt('GB82WEST12345698765432', 'transactions.creditor_iban'),
         reference,
       ]);
 
@@ -295,7 +322,7 @@ describe('Integrite des donnees de paiement (e2e)', () => {
       await anchorService.processPendingBatch();
 
       await dataSource.query('UPDATE transactions SET creditor_iban = $1 WHERE reference = $2', [
-        'GB82WEST12345698765432',
+        FieldCipher.encrypt('GB82WEST12345698765432', 'transactions.creditor_iban'),
         reference,
       ]);
 
@@ -304,7 +331,10 @@ describe('Integrite des donnees de paiement (e2e)', () => {
       await expect(
         dataSource.query(
           'UPDATE transaction_events SET creditor_iban = $1 WHERE transaction_reference = $2',
-          ['GB82WEST12345698765432', reference],
+          [
+            FieldCipher.encrypt('GB82WEST12345698765432', 'transaction_events.creditor_iban'),
+            reference,
+          ],
         ),
       ).rejects.toThrow(/append-only/);
 

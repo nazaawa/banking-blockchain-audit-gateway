@@ -28,7 +28,7 @@ describe('FieldCipher', () => {
   });
 
   it('detecte une charge utile tronquee', () => {
-    expect(() => FieldCipher.decrypt('enc.v1.AQID', 'transactions.debtor_iban')).toThrow(
+    expect(() => FieldCipher.decrypt('enc.v1.test.AQID', 'transactions.debtor_iban')).toThrow(
       /tronquee/,
     );
   });
@@ -41,9 +41,56 @@ describe('FieldCipher', () => {
     );
   });
 
-  it('tolere une valeur heritee en clair', () => {
-    expect(FieldCipher.decrypt('FR7630006000011234567890189', 'transactions.debtor_iban')).toBe(
-      'FR7630006000011234567890189',
+  it('refuse une valeur en clair pour bloquer tout downgrade', () => {
+    expect(() =>
+      FieldCipher.decrypt('FR7630006000011234567890189', 'transactions.debtor_iban'),
+    ).toThrow(/downgrade/);
+  });
+
+  it('lit une ancienne cle mais chiffre uniquement avec la cle courante', () => {
+    const oldKey = randomBytes(32);
+    const newKey = randomBytes(32);
+    FieldCipher.useKeyRing('key-2025', new Map([['key-2025', oldKey]]));
+    const oldCiphertext = FieldCipher.encrypt('ACME GmbH', 'transactions.creditor_name');
+
+    FieldCipher.useKeyRing(
+      'key-2026',
+      new Map([
+        ['key-2026', newKey],
+        ['key-2025', oldKey],
+      ]),
+    );
+    const newCiphertext = FieldCipher.encrypt('ACME GmbH', 'transactions.creditor_name');
+
+    expect(oldCiphertext).toMatch(/^enc\.v1\.key-2025\./);
+    expect(newCiphertext).toMatch(/^enc\.v1\.key-2026\./);
+    expect(FieldCipher.decrypt(oldCiphertext, 'transactions.creditor_name')).toBe('ACME GmbH');
+  });
+
+  it('refuse un chiffre dont la cle a quitte le keyring', () => {
+    FieldCipher.useKeyRing('old', new Map([['old', randomBytes(32)]]));
+    const stored = FieldCipher.encrypt('ACME GmbH', 'transactions.creditor_name');
+    FieldCipher.useKeyRing('new', new Map([['new', randomBytes(32)]]));
+
+    expect(() => FieldCipher.decrypt(stored, 'transactions.creditor_name')).toThrow(
+      /absente du keyring/,
+    );
+  });
+
+  it('isole la lecture de l ancien format sans keyId au chemin de migration', () => {
+    const legacyKey = randomBytes(32);
+    FieldCipher.useKeyRing('legacy', new Map([['legacy', legacyKey]]));
+    const currentFormat = FieldCipher.encrypt(
+      'DE89370400440532013000',
+      'transactions.creditor_iban',
+    ) as string;
+    const legacyFormat = currentFormat.replace('enc.v1.legacy.', 'enc.v1.');
+
+    expect(() => FieldCipher.decrypt(legacyFormat, 'transactions.creditor_iban')).toThrow(
+      /downgrade/,
+    );
+    expect(FieldCipher.decryptLegacyV1(legacyFormat, 'transactions.creditor_iban', legacyKey)).toBe(
+      'DE89370400440532013000',
     );
   });
 });

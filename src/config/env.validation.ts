@@ -1,3 +1,5 @@
+import { LOCAL_SECURITY_MASTER_KEY } from '../security/key-derivation';
+
 /**
  * Validation des variables d'environnement au demarrage.
  *
@@ -59,7 +61,19 @@ const RULES: Rule[] = [
   { key: 'AUDIT_PERSIST_PAYLOADS', kind: 'boolean' },
   { key: 'SWAGGER_ENABLED', kind: 'boolean' },
   { key: 'AUTH_ENABLED', kind: 'boolean' },
-  { key: 'SECURITY_MASTER_KEY', kind: 'string', minLength: 32, secret: true },
+  {
+    key: 'SECURITY_MASTER_KEY',
+    kind: 'pattern',
+    pattern: /^[A-Za-z0-9+/]{43}=$/,
+    expected: 'une cle Base64 representant exactement 32 octets',
+    secret: true,
+  },
+  {
+    key: 'SECURITY_CURRENT_KEY_ID',
+    kind: 'pattern',
+    pattern: /^[A-Za-z0-9_-]{1,32}$/,
+    expected: 'un identifiant de cle (1 a 32 lettres, chiffres, _ ou -)',
+  },
   { key: 'SECURITY_KEY_SALT', kind: 'string', minLength: 16 },
 
   { key: 'BLOCKCHAIN_ENABLED', kind: 'boolean' },
@@ -175,13 +189,45 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
     if (!read('API_KEYS').trim()) {
       errors.push('API_KEYS est requis en production : aucune cle declaree');
     }
-    if (
-      !read('SECURITY_MASTER_KEY') ||
-      read('SECURITY_MASTER_KEY') === 'local-demo-master-key-a-remplacer'
-    ) {
+    if (!read('SECURITY_MASTER_KEY') || read('SECURITY_MASTER_KEY') === LOCAL_SECURITY_MASTER_KEY) {
       errors.push(
         'SECURITY_MASTER_KEY doit etre un secret explicite en production (valeur masquee)',
       );
+    }
+    if (!read('SECURITY_CURRENT_KEY_ID') || read('SECURITY_CURRENT_KEY_ID') === 'local-v1') {
+      errors.push('SECURITY_CURRENT_KEY_ID doit etre explicite en production');
+    }
+  }
+
+  const previousKeys = read('SECURITY_PREVIOUS_KEYS');
+  const currentMasterKey = read('SECURITY_MASTER_KEY');
+  if (
+    /^[A-Za-z0-9+/]{43}=$/.test(currentMasterKey) &&
+    new Set(Buffer.from(currentMasterKey, 'base64')).size < 4
+  ) {
+    errors.push(
+      'SECURITY_MASTER_KEY presente une entropie manifestement insuffisante (valeur masquee)',
+    );
+  }
+  if (previousKeys) {
+    const seen = new Set<string>();
+    for (const entry of previousKeys.split(',')) {
+      const [keyId, encoded, ...extra] = entry.trim().split('|');
+      if (
+        extra.length > 0 ||
+        !/^[A-Za-z0-9_-]{1,32}$/.test(keyId ?? '') ||
+        !/^[A-Za-z0-9+/]{43}=$/.test(encoded ?? '') ||
+        new Set(Buffer.from(encoded ?? '', 'base64')).size < 4 ||
+        seen.has(keyId) ||
+        keyId === read('SECURITY_CURRENT_KEY_ID')
+      ) {
+        errors.push(
+          'SECURITY_PREVIOUS_KEYS doit contenir des entrees uniques keyId|Base64-32-octets ' +
+            '(valeurs masquees), distinctes de SECURITY_CURRENT_KEY_ID',
+        );
+        break;
+      }
+      seen.add(keyId);
     }
   }
 

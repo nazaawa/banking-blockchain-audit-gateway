@@ -2,6 +2,11 @@ import type { Signer } from 'ethers';
 
 export const KEY_CUSTODY_PORT = Symbol('KEY_CUSTODY_PORT');
 
+export interface DataEncryptionKeyRing {
+  currentKeyId: string;
+  keys: ReadonlyMap<string, Buffer>;
+}
+
 /**
  * Garde des secrets cryptographiques.
  *
@@ -43,7 +48,7 @@ export interface KeyCustodyPort {
    * memoire pour la duree du service — d'ou la mise en cache par l'adaptateur
    * plutot qu'une lecture a chaque appel.
    */
-  getDataEncryptionKey(): Promise<Buffer>;
+  getDataEncryptionKeyRing(): Promise<DataEncryptionKeyRing>;
 
   /** Nom de la garde active, journalise au demarrage. */
   readonly custodyName: string;
