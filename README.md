@@ -83,7 +83,7 @@ Le flux de virement classique (`POST /transfers`) suit le même modèle en une s
 | Blockchain       | Chaîne EVM locale (Anvil / nœud Hardhat) + contrat Solidity |
 | Client chaîne    | `ethers` v6                                                 |
 | Documentation    | Swagger / OpenAPI 3                                         |
-| Tests            | Jest + Supertest — **380 tests**                            |
+| Tests            | Jest + Supertest — **399 tests**                            |
 | Conteneurisation | Docker multi-stage + Docker Compose                         |
 
 `xmllint-wasm` a été retenu plutôt que `libxmljs` (compilation native) ou `xsd-schema-validator`
@@ -320,6 +320,9 @@ C'est l'extinction de la dette qui autorise la clôture, donc l'ancrage.
 | `GET`   | `/ledger/transfers/{ref}/entries`                | Écritures d'une transaction                      |
 | `POST`  | `/treasury/sweeps`                               | Rapatriement des fonds — idempotent              |
 | `GET`   | `/health`                                        | PostgreSQL, client SOAP, schémas XSD, blockchain |
+| `GET`   | `/health/live`                                   | Vivacité — aucune dépendance consultée           |
+| `GET`   | `/health/ready`                                  | Aptitude au trafic — blockchain exclue           |
+| `GET`   | `/metrics`                                       | Exposition Prometheus                            |
 
 ---
 
@@ -548,11 +551,13 @@ le démontrer, puisque toute lecture applicative montrerait le clair même sans 
 exactement le défaut que ce chiffrement existe pour empêcher : une base qu'on croit protégée et qui
 ne l'est pas.
 
-**Le clair hérité est toléré en lecture.** Les lignes antérieures ne portent pas le préfixe de
-version `enc.v1.` et sont rendues telles quelles ; toute écriture chiffre. Convertir en masse
-supposerait de faire transiter la clé par l'outillage de schéma — élargir la surface d'exposition du
-secret pour chiffrer des lignes de démonstration ne le vaut pas. Le retour arrière de la migration
-**refuse** de s'exécuter s'il reste du chiffré, plutôt que de le tronquer.
+**Le clair est refusé, historique compris.** Une migration introduit `encryption_version`, convertit
+toutes les lignes existantes avec la clé de données, puis les passe en version `1`. Des contraintes
+PostgreSQL imposent ensuite cette version et le format
+`enc.v1.<keyId>.<payload>` sur chaque valeur non nulle. Supprimer le préfixe, inscrire un IBAN en
+clair ou ramener la version à `0` est donc rejeté avant toute lecture applicative. La même règle
+reste active en développement afin que les tests n'exercent pas un modèle plus permissif que la
+production.
 
 ### Garde des secrets
 
@@ -568,6 +573,14 @@ secret gardé d'un secret simplement rangé ailleurs.
 La seule propriété réellement ajoutée sans coffre : les clés sont dérivées par **HKDF** avec une
 étiquette de domaine. Compromettre le chiffrement ne livre pas la signature.
 
+`SECURITY_MASTER_KEY` est une valeur Base64 représentant exactement 32 octets, générable avec
+`openssl rand -base64 32`. Chaque chiffre porte `SECURITY_CURRENT_KEY_ID`. Une rotation place
+l'ancienne paire `keyId|Base64` dans `SECURITY_PREVIOUS_KEYS` pour la lecture et utilise uniquement
+la clé courante pour les nouvelles écritures. L'ancienne variable brute peut être fournie
+temporairement dans `SECURITY_LEGACY_MASTER_KEY` pendant la migration des chiffres dépourvus de
+`keyId`, puis doit être retirée. En production, un KMS/HSM reste préférable à ce keyring
+d'environnement.
+
 ### Séparation des tâches
 
 Sur le flux de litige, deux habilitations distinctes :
@@ -577,13 +590,15 @@ Sur le flux de litige, deux habilitations distinctes :
 | `refunds:write`   | `POST /transfers/{ref}/refund`        | Opération — fait sortir des fonds    |
 | `refunds:approve` | `POST /transfers/{ref}/refund/reopen` | Contrôle — lève un refus fournisseur |
 
-Le contrôle ne s'arrête pas aux habilitations : **la clé qui a demandé un remboursement ne peut pas
-lever son propre refus**, même munie des deux droits. Sans cela, un acteur forcerait indéfiniment un
-remboursement que le fournisseur refuse, sans qu'aucun tiers ne l'examine. Un test le prouve avec
-une clé qui cumule les rôles.
+Le contrôle ne s'arrête pas aux habilitations : **la clé qui a déclenché la dernière tentative
+manuelle ne peut pas lever son refus**, même munie des deux droits. `createdBy`,
+`lastRequestedBy` et `lastApprovedBy` distinguent la création, la dernière opération et la dernière
+approbation. Chaque reprise ajoute un nouveau `REFUND_REQUESTED`, au lieu de laisser la première
+demande représenter toute la vie du dossier.
 
-Les deux acteurs sont consignés au registre : `requestedBy` sur `REFUND_REQUESTED`, `reopenedBy` sur
-`REFUND_REOPENED`.
+L'identité n'est pas un texte libre : `actorId`, `actorRole` et `actionOrigin` sont des champs du
+registre, du XSD et du XML canonique. Ils entrent donc dans l'empreinte cryptographique de chaque
+demande, reprise, refus et confirmation.
 
 ### Durcissement des parseurs
 
@@ -802,22 +817,109 @@ La clé de contrôle MOD 97-10 n'étant pas exprimable en XSD 1.0, elle reste v�
 
 ### Migrations
 
-Douze migrations, rejouables depuis une base vide, `schema:log` propre à l'arrivée :
+Quatorze migrations, rejouables depuis une base vide, `schema:log` propre à l'arrivée :
 
 ```
 InitialSchema · AddBlockchainAudit · AddMobileMoneyFlow · SplitPaymentStatuses
 AddTransactionEvents · AddRefunds · RefundReopenAndIntegrity · AddClosureProof
 LedgerReplacesSnapshot · AddStateInvariants · AddDoubleEntryLedger
-EncryptPartyFields
+EncryptPartyFields · EnforceEncryptedPartyFields · AddEventActorsAndRefundActors
 ```
+
+---
+
+## Exploitation
+
+### Sondes séparées
+
+| Route               | Question                          | Dépendances consultées               |
+| ------------------- | --------------------------------- | ------------------------------------ |
+| `GET /health/live`  | Le processus répond-il ?          | **Aucune**                           |
+| `GET /health/ready` | Peut-il traiter du trafic ?       | PostgreSQL, client SOAP, schémas XSD |
+| `GET /health`       | Vue détaillée pour la supervision | Tout, blockchain comprise            |
+
+La distinction n'est pas cosmétique. Un orchestrateur **redémarre** le conteneur quand la sonde de
+vivacité échoue : la faire dépendre de PostgreSQL ferait redémarrer en boucle un service
+parfaitement sain parce qu'un tiers est indisponible — et aggraverait la panne, chaque redémarrage
+rouvrant des connexions vers un composant déjà en difficulté.
+
+La blockchain est **exclue de l'aptitude au trafic**. L'ancrage est asynchrone et rattrapable : un
+nœud injoignable retarde la publication des preuves, il n'empêche ni d'encaisser ni de payer.
+Retirer le service du trafic pour cela couperait un système qui fonctionne.
+
+Les trois routes sont publiques : un orchestrateur ne porte pas de secret applicatif.
+
+### Métriques
+
+`GET /metrics`, exposition Prometheus. Le choix des signaux répond aux seules questions qu'un
+exploitant se pose réellement ici — un compteur de requêtes HTTP indiquerait que l'API répond, pas
+qu'elle est juste.
+
+| Série                                     | Ce qu'elle révèle                                              |
+| ----------------------------------------- | -------------------------------------------------------------- |
+| `gateway_debt_outstanding{currency}`      | Combien nous devons, et en quelle devise                       |
+| `gateway_ledger_imbalance{currency}`      | **Doit valoir zéro** — une valeur non nulle est une corruption |
+| `gateway_events_unanchored`               | Retard de l'audit sur la réalité                               |
+| `gateway_cases_open`                      | Dossiers en attente de traitement humain                       |
+| `gateway_soap_duration_seconds`           | Latence du back-office, mesurée chez l'appelant                |
+| `gateway_refunds_failed_total{retryable}` | Refus métier distingués des indisponibilités                   |
+
+Les soldes et files d'attente sont **lus en base au moment du grattage** plutôt que maintenus en
+mémoire. Un compteur incrémenté à la main dérive dès qu'une écriture oublie de le mettre à jour — et
+un compteur qui dérive silencieusement est pire qu'une absence de compteur, parce qu'on lui fait
+confiance.
+
+La latence SOAP est mesurée **au point d'appel**, non dans le client. Ce n'est pas un détail : les
+tests d'intégration bouchonnent le client, une instrumentation placée à l'intérieur serait donc
+invérifiable par construction — et une métrique déclarée mais jamais alimentée est pire qu'absente,
+puisqu'elle laisse croire que la latence est surveillée. Un test verrouille le câblage.
+
+L'exposition ne contient **aucune donnée nominative** : des montants agrégés, jamais un IBAN, un
+MSISDN ni une référence de transaction. Un test le vérifie sur le corps entier.
+
+### Le contrôle de restauration
+
+```bash
+npm run ops:verify-restore
+```
+
+**Sur ce système, une sauvegarde ne suffit pas à restaurer.** Un instantané antérieur au dernier
+ancrage produit une base où manquent des faits _déjà publiés sur la chaîne_. La vérification
+d'intégrité rendra `TAMPERED` — et elle aura raison : des preuves opposables porteront sur des
+données absentes.
+
+Sans outil, l'exploitant constate des verdicts `TAMPERED` en cascade sans savoir s'il fait face à une
+attaque ou à une restauration trop ancienne. **Les deux appellent des réactions opposées** : l'une
+déclenche une enquête, l'autre un rejeu des journaux.
+
+La commande relit, pour chaque lot ancré, le nombre de feuilles **publié on-chain** et le confronte
+au nombre de faits réellement présents. La chaîne, que l'opérateur ne contrôle pas, sert de témoin
+de ce qui existait au moment de la publication.
+
+| Verdict             | Signification                                     | Code de sortie |
+| ------------------- | ------------------------------------------------- | -------------- |
+| `CONSISTENT`        | La base contient tout ce qui a été publié         | `0`            |
+| `DATA_LOSS`         | Des faits publiés manquent — rejouer les journaux | `1`            |
+| `CHAIN_UNAVAILABLE` | Témoin injoignable, ne pas conclure               | `1`            |
+
+Le code de sortie permet de garder une remise en service automatisée : `CHAIN_UNAVAILABLE` échoue
+délibérément, car conclure « fidèle » sans avoir pu interroger le témoin autoriserait une reprise à
+l'aveugle.
+
+### Haute disponibilité
+
+Déjà en place, et vérifié plutôt que supposé : l'ancrage prend un **verrou consultatif PostgreSQL de
+session** — qui couvre aussi les appels RPC hors transaction —, les réclamations de lot utilisent
+`SKIP LOCKED`, et les transactions portent un verrouillage optimiste. Deux instances ne peuvent ni
+ancrer en parallèle, ni traiter deux fois le même webhook.
 
 ---
 
 ## Tests
 
 ```bash
-npm test          # 244 tests unitaires
-npm run test:e2e  # 136 tests d'intégration (PostgreSQL requis, exécution sérielle)
+npm test          # 252 tests unitaires
+npm run test:e2e  # 147 tests d'intégration (PostgreSQL requis, exécution sérielle)
 npm run test:cov  # couverture
 ```
 
@@ -838,6 +940,9 @@ Couverture notable :
   protection append-only imposée par la base ;
 - **Machine à états** — chemins réels du flux acceptés, retours en arrière et états impossibles
   refusés, diagnostic complet plutôt que première violation ;
+- **Exploitation** — vivacité maintenue chaîne coupée, aptitude indifférente à la blockchain,
+  métriques mesurées sur un flux réel plutôt que sur base vide, perte de données distinguée d'une
+  altération, refus de conclure sans témoin ;
 - **Sécurité** — chiffré en base vérifié par lecture SQL brute, empreintes toujours vérifiables
   malgré le chiffrement, séparation des tâches y compris pour une clé cumulant les deux rôles ;
 - **Ledger** — équilibre sur chaque flux, écriture déséquilibrée refusée en SQL direct, dette
@@ -897,9 +1002,12 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 | État impossible écrit en SQL direct             | Rejeté par les contraintes `CHECK` (3 cas éprouvés)                                               |
 | Écriture comptable déséquilibrée en SQL direct  | Rejetée au commit par le déclencheur d'équilibre                                                  |
 | Écart de 1200 sur 1250.75 commandés             | `PAYER_PAYABLE = 1200.00` — la dette porte un montant, non un drapeau                             |
-| Lecture SQL brute des colonnes d'IBAN           | `enc.v1.…` — aucune occurrence en clair                                                           |
+| Lecture SQL brute des colonnes d'IBAN           | `enc.v1.<keyId>.…` — aucune occurrence en clair                                                   |
 | Vérification après chiffrement                  | `VERIFIED` — aucune empreinte publiée n'est invalidée                                             |
 | Réouverture par la clé demandeuse               | `403 SEGREGATION_OF_DUTIES`, même avec les deux habilitations                                     |
+| Écart de montant, lecture de `/metrics`         | `debt_outstanding{EUR} 1200`, `ledger_imbalance{EUR} 0`, `cases_open 1`                           |
+| Restauration antérieure au dernier ancrage      | `DATA_LOSS` — faits manquants nommés, rejeu des journaux préconisé                                |
+| Chaîne coupée pendant le contrôle               | `CHAIN_UNAVAILABLE` — refus explicite de conclure                                                 |
 | Consignation en échec pendant une écriture      | Écriture métier annulée ; aucun dossier orphelin, rejeu possible                                  |
 | Fuite d'IBAN (logs + audit + API)               | Aucune                                                                                            |
 
@@ -937,6 +1045,9 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 │   │   ├── merkle.util.ts          #   arbre et preuves, compatibles OpenZeppelin
 │   │   ├── anchor.service.ts       #   lots, planification, reprises
 │   │   └── evm-anchor.client.ts    #   ethers ↔ contrat
+│   ├── observability/              # Sondes, métriques, contrôle de restauration
+│   │   ├── metrics.service.ts      #   signaux métier, lus en base au grattage
+│   │   └── restore-verification.service.ts
 │   ├── security/                   # Garde des secrets et chiffrement au repos
 │   │   ├── key-custody.port.ts     #   signature et clé de données, jamais le secret
 │   │   ├── env-key-custody.adapter.ts
@@ -982,12 +1093,17 @@ Ce dépôt est une démonstration d'intégration, pas un service de paiement.
 - **Chiffrement au repos sans coffre.** Les IBAN sont chiffrés, mais la clé est dérivée d'un secret
   d'environnement : qui lit l'environnement lit les données. Le port de garde rend le remplacement
   par un KMS possible sans toucher au reste — il ne le remplace pas.
-- **Aucune rotation de clé.** Le préfixe `enc.v1.` la rendrait possible, mais rien ne réchiffre les
-  lignes existantes.
-- **Lignes antérieures en clair.** Elles ne sont converties qu'à la réécriture.
+- **Réchiffrement de rotation non automatisé.** Le keyring permet d'écrire avec la clé courante et de
+  lire les clés précédentes, mais leur retrait exige encore une campagne explicite de réchiffrement
+  des lignes existantes.
 - **Pas de purge.** Le registre croît indéfiniment et, par nature, ne peut pas être élagué sans
   rompre le chaînage. Une politique de rétention supposerait d'archiver des segments clos avec leur
   preuve de synthèse.
+- **Ni traces distribuées, ni tableaux de bord.** OpenTelemetry écarté délibérément : sans
+  collecteur, les traces partiraient nulle part et ne seraient vérifiables par aucun test. Les
+  tableaux de bord et règles d'alerte vivent dans Grafana et Prometheus, pas dans ce dépôt.
+- **Aucune sauvegarde automatisée.** Le contrôle de restauration existe, la sauvegarde elle-même
+  relève de l'exploitation de la base.
 - **Pas de vérification en masse.** Le contrôle est unitaire ; un audit de bout en bout supposerait
   une revérification par lot.
 - **Pas de contre-passation exposée.** Le journal étant append-only, corriger une erreur comptable
