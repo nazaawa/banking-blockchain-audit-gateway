@@ -1,14 +1,13 @@
-# banking-soap-integration-demo
+# Banking Integration & Blockchain Audit Gateway
 
-API REST d'initiation de virement bancaire adossée à un **service SOAP public**.
+Passerelle bancaire simulée qui reçoit un ordre de virement en REST/JSON, le transforme en **XML
+canonique validé par XSD**, le soumet à un **service SOAP** décrit par un WSDL, le persiste dans
+**PostgreSQL**, puis inscrit une **preuve cryptographique** sur une **blockchain** — afin que toute
+altération ultérieure des données devienne détectable.
 
-Le projet illustre un cas d'intégration récurrent en banque : une façade REST/JSON moderne qui
-doit dialoguer avec un back-office SOAP/XML, sans jamais exposer de données sensibles dans ses
-journaux ni dans sa piste d'audit.
-
-Le service externe utilisé est [DataAccess Number Conversion](https://www.dataaccess.com/webservicesserver/NumberConversion.wso?WSDL),
-dont l'opération `NumberToDollars` convertit le montant du virement **en toutes lettres** — l'équivalent
-du libellé littéral qu'on retrouve sur un chèque ou un ordre de paiement.
+> La blockchain ne porte **aucun** paiement et **aucune** donnée bancaire. Elle sert de registre
+> d'audit inviolable : seule une racine de Merkle de 32 octets y est publiée, dont on ne peut rien
+> reconstituer.
 
 ---
 
@@ -19,21 +18,34 @@ POST /api/v1/transfers  (JSON)
    │
    ├─ 1. Validation          IBAN (ISO 13616 + clé MOD 97-10), montant, devise, libellé SEPA
    ├─ 2. Règles métier       devise autorisée, plafond, comptes distincts
-   ├─ 3. Idempotence         en-tête Idempotency-Key → rejeu sans nouvel appel externe
-   ├─ 4. Référence unique    TRF-YYYYMMDD-XXXXXXXX (CSPRNG, Crockford base32)
-   ├─ 5. Persistance         PostgreSQL, statut PENDING  ← AVANT tout appel externe
-   ├─ 6. Appel SOAP          NumberToDollars, WSDL local, timeout + reprises
-   ├─ 7. Analyse XML         xml2js durci → détection <soap:Fault> 1.1 / 1.2
-   ├─ 8. Transformation      XML → JSON métier
-   ├─ 9. Statut terminal     COMPLETED ou FAILED
-   └─ 10. Audit              échanges consignés, payloads XML masqués
+   ├─ 3. Transformation XML  document canonique TransferRequest
+   ├─ 4. Validation XSD      transfer-request.xsd — rejet 422 si non conforme
+   ├─ 5. Idempotence         Idempotency-Key → rejeu sans nouvel appel externe
+   ├─ 6. Référence unique    TRF-YYYYMMDD-XXXXXXXX (CSPRNG, Crockford base32)
+   ├─ 7. Persistance         PostgreSQL, statut PENDING  ← AVANT tout appel externe
+   ├─ 8. Appel SOAP          NumberToDollars (WSDL local, timeout, reprises)
+   ├─ 9. Analyse XML         parseur durci → détection <soap:Fault> 1.1 / 1.2
+   ├─ 10. Statut terminal    COMPLETED ou FAILED
+   ├─ 11. Scellement         TransferRecord canonique → validé XSD → keccak256(sel ‖ document)
+   └─ 12. Audit              échanges consignés, payloads XML masqués
    │
-   └─→ 201 Created  ·  GET /api/v1/transfers/{reference} pour consulter le statut
+   └─→ 201 Created
+
+[asynchrone, périodique]
+   └─ Lot de N transactions → arbre de Merkle → racine publiée sur la chaîne
+                            → preuve d'inclusion persistée par transaction
+
+GET /api/v1/transfers/{ref}/verification
+   └─ Reconstruit · revalide · recalcule l'empreinte · confronte à la chaîne
 ```
 
-Point de conception structurant : **la transaction est enregistrée avant l'appel externe**. Si le
-service SOAP échoue, l'API répond 502/504 mais renvoie la `reference` dans le corps d'erreur —
-la demande reste consultable avec le statut `FAILED` et le détail de la faute.
+Deux principes structurants :
+
+- **La transaction est enregistrée avant l'appel externe.** Si le SOAP échoue, l'API répond 502/504
+  mais renvoie la `reference` : la demande reste consultable avec le statut `FAILED`.
+- **L'ancrage est asynchrone.** Une écriture on-chain prend de quelques secondes à plusieurs
+  minutes ; l'inclure dans le cycle HTTP reproduirait le défaut que l'on évite déjà sur le SOAP.
+  Le scellement, lui, est synchrone et instantané.
 
 ---
 
@@ -45,76 +57,71 @@ la demande reste consultable avec le statut `FAILED` et le détail de la faute.
 | Base de données | PostgreSQL 16 |
 | ORM | TypeORM 0.3 (repository dédié, verrouillage optimiste) |
 | Client SOAP | `soap` (node-soap) sur WSDL embarqué |
-| Parsing XML | `xml2js` avec gardes anti-XXE |
+| Analyse XML | `xml2js` avec gardes anti-XXE |
+| Validation XSD | `xmllint-wasm` — libxml2 en WebAssembly |
+| Blockchain | Chaîne EVM locale (Anvil / nœud Hardhat) + contrat Solidity |
+| Client chaîne | `ethers` v6 |
 | Documentation | Swagger / OpenAPI 3 |
-| Tests | Jest + Supertest — 142 tests |
+| Tests | Jest + Supertest — **223 tests** |
 | Conteneurisation | Docker multi-stage + Docker Compose |
 
-TypeORM a été retenu plutôt que Prisma : l'arborescence demandée prévoit un
-`transactions.repository.ts`, et le pattern *repository* de TypeORM s'y prête directement.
+`xmllint-wasm` a été retenu plutôt que `libxmljs` (compilation native) ou `xsd-schema-validator`
+(dépendance à une JVM) : c'est le même moteur que l'outil `xmllint` de référence, sans rien à
+compiler, identique du poste de développement à l'image Alpine.
 
 ---
 
 ## Démarrage
 
-### Option A — Docker Compose (recommandé)
+### Option A — Docker Compose
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
-L'API attend que PostgreSQL soit réellement prêt (`healthcheck` + `depends_on: service_healthy`).
+Compose orchestre l'ordre : PostgreSQL et la chaîne démarrent, le contrat est déployé
+(`contract-deployer`, exécution unique), puis l'API démarre.
+
+Anvil étant déterministe, le compte #0 déployant sa première transaction obtient toujours
+`0x5FbDB2315678afecb367f032d93F642f64180aa3` — l'API connaît donc l'adresse à l'avance.
+
+### Option B — En local
+
+Trois terminaux, ou trois commandes en arrière-plan.
+
+```bash
+# 0. Base de données (une fois)
+createdb banking_soap && createdb banking_soap_test
+psql -d banking_soap      -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
+psql -d banking_soap_test -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
+
+npm install
+cp .env.example .env
+
+# 1. Chaîne EVM locale
+npm run chain:node
+
+# 2. Compilation et déploiement du contrat
+npm run contract:compile
+npm run contract:deploy      # affiche l'adresse → BLOCKCHAIN_CONTRACT_ADDRESS dans .env
+
+# 3. Passerelle
+npm run start:dev
+```
 
 - API : http://localhost:3000/api/v1
 - Swagger : http://localhost:3000/api/docs
 - Santé : http://localhost:3000/api/v1/health
 
-### Option B — Node en local
-
-Nécessite un PostgreSQL joignable.
-
-```bash
-# Préparer la base
-createdb banking_soap
-psql -d banking_soap -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
-
-cp .env.example .env      # ajuster DB_USERNAME / DB_PASSWORD
-npm install
-npm run start:dev
-```
-
-`DB_SYNCHRONIZE=true` crée le schéma au démarrage — pratique en développement. En production,
-laisser à `false` et utiliser les migrations (voir plus bas).
-
----
-
-## Configuration
-
-Toutes les variables sont documentées dans [`.env.example`](.env.example). Elles sont **validées au
-démarrage** (`src/config/env.validation.ts`) : le processus refuse de démarrer sur une
-configuration incohérente plutôt que d'échouer en pleine transaction.
-
-Les plus structurantes :
-
-| Variable | Défaut | Rôle |
-| --- | --- | --- |
-| `SOAP_WSDL_SOURCE` | `local` | `local` = WSDL embarqué, aucun appel réseau au boot ; `remote` = téléchargé |
-| `SOAP_ENDPOINT` | DataAccess | Adresse effective, surchargeable pour viser un bouchon en recette |
-| `SOAP_TIMEOUT_MS` | `8000` | Délai par tentative |
-| `SOAP_MAX_RETRIES` | `2` | Reprises sur **erreur de communication uniquement** |
-| `SOAP_MAX_RESPONSE_BYTES` | `1048576` | Taille XML maximale acceptée par le parseur |
-| `ALLOWED_CURRENCIES` | `EUR,USD,…` | Liste blanche ISO 4217 |
-| `TRANSFER_MAX_AMOUNT` | `999999999.99` | Plafond par virement |
-| `AUDIT_PERSIST_PAYLOADS` | `true` | `false` = aucun payload XML conservé (mode strict) |
+Pour travailler sans chaîne, `BLOCKCHAIN_ENABLED=false` : les transactions restent scellées
+(empreinte calculée, altération détectable localement) mais ne sont jamais publiées.
 
 ---
 
 ## API
 
-### `POST /api/v1/transfers` — initier un virement
-
-En-têtes optionnels : `Idempotency-Key`, `X-Correlation-Id`.
+### Initier un virement
 
 ```bash
 curl -X POST http://localhost:3000/api/v1/transfers \
@@ -131,319 +138,328 @@ curl -X POST http://localhost:3000/api/v1/transfers \
   }'
 ```
 
-`201 Created` — réponse réelle du service public :
+`201 Created` — réponse réelle du service public DataAccess :
 
 ```json
 {
   "reference": "TRF-20260725-02AC53WQ",
   "status": "COMPLETED",
   "debtorIbanMasked": "FR76****0189",
-  "debtorName": "Societe Kongo SARL",
   "creditorIbanMasked": "DE89****3000",
   "creditorName": "ACME GmbH",
   "amount": 1250.75,
   "currency": "EUR",
-  "endToEndLabel": "Facture 2026-0042",
   "amountInWords": "one thousand two hundred and fifty dollars and seventy five cents",
   "soap": { "operation": "NumberToDollars", "durationMs": 1865, "attempts": 1 },
   "correlationId": "6f8724f3-104b-4423-8e55-affd30d1b812",
-  "processedAt": "2026-07-25T10:30:31.748Z",
-  "createdAt": "2026-07-25T10:30:29.839Z",
-  "updatedAt": "2026-07-25T10:30:31.749Z"
+  "processedAt": "2026-07-25T10:30:31.748Z"
 }
 ```
 
-Les IBAN sont volontairement **masqués** dans toute réponse HTTP : les champs s'appellent
-`debtorIbanMasked` / `creditorIbanMasked` pour que le contrat soit explicite. La valeur complète
-n'existe qu'en base, où elle est nécessaire à l'exécution du virement.
+Les IBAN ne sont **jamais** restitués en clair : les champs s'appellent `debtorIbanMasked` /
+`creditorIbanMasked` pour que le contrat soit explicite.
 
-### `GET /api/v1/transfers/{reference}` — consulter le statut
-
-### `GET /api/v1/transfers` — lister
-
-Filtres `status`, `currency` ; pagination `page`, `limit` (max 100).
+### Vérifier l'intégrité
 
 ```bash
-curl 'http://localhost:3000/api/v1/transfers?status=FAILED&limit=10'
+curl http://localhost:3000/api/v1/transfers/TRF-20260725-02AC53WQ/verification
 ```
-
-### `GET /api/v1/transfers/{reference}/audit` — piste d'audit
-
-Retourne les échanges SOAP consignés, avec payloads XML masqués et tronqués.
-
-### `GET /api/v1/health` — supervision
-
-`200` si PostgreSQL répond et que le client SOAP est initialisable, `503` sinon. La sonde
-n'appelle **aucune** opération métier du fournisseur.
-
----
-
-## Codes d'erreur
-
-Enveloppe unique pour toutes les erreurs (`src/common/filters/all-exceptions.filter.ts`) :
 
 ```json
 {
-  "statusCode": 502,
-  "error": "SOAP_FAULT",
-  "message": "Le service externe a retourne une faute : Server was unable to process request. ---> Value was either too large or too small for a Decimal.",
-  "correlationId": "b6f0c4a2-…",
-  "timestamp": "2026-07-25T10:12:33.415Z",
-  "path": "/api/v1/transfers",
-  "reference": "TRF-20260725-C9ZV95SX",
-  "details": { "faultCode": "soap:Server", "soapVersion": "1.1", "operation": "NumberToDollars" }
+  "verdict": "VERIFIED",
+  "checks": {
+    "recordRebuilt": true,
+    "xsdValid": true,
+    "fingerprintMatches": true,
+    "merkleProofValid": true,
+    "onChainRootMatches": true,
+    "onChainInclusionVerified": true
+  },
+  "sealedFingerprint": "0xc9aac0902151e80b92b17d8b9a42486f51af83f3dde6f09dbf2817d9a033a508",
+  "recomputedFingerprint": "0xc9aac0902151e80b92b17d8b9a42486f51af83f3dde6f09dbf2817d9a033a508",
+  "batch": {
+    "merkleRoot": "0x32d7753f648c6d98633dd4e98cc4c8c506c8ca6f8d8d5268e8722cecb45de83b",
+    "txHash": "0xfb4b24e2afc319e682bf88cee5b75e8e49237643f9926c4e9923391934b00210",
+    "blockNumber": "10",
+    "chainId": "31337"
+  },
+  "findings": [
+    "Les donnees en base correspondent exactement a l empreinte scellee.",
+    "Inclusion confirmee par le contrat 0x5FbD…0aa3 (chaine 31337), racine publiee dans la transaction 0xfb4b…0210."
+  ]
 }
 ```
 
-| HTTP | `error` | Cause |
-| --- | --- | --- |
-| 400 | `VALIDATION_ERROR` | IBAN, montant, libellé, champ hors contrat |
-| 400 | `CURRENCY_NOT_ALLOWED` | Devise absente de `ALLOWED_CURRENCIES` |
-| 404 | `TRANSACTION_NOT_FOUND` | Référence inconnue |
-| 409 | `IDEMPOTENCY_CONFLICT` | Course non résolue sur la clé d'idempotence |
-| 422 | `AMOUNT_LIMIT_EXCEEDED` | Montant au-delà du plafond |
-| 422 | `SAME_ACCOUNT_TRANSFER` | Donneur d'ordre = bénéficiaire |
-| 502 | `SOAP_FAULT` | Le fournisseur a répondu par une `<soap:Fault>` |
-| 502 | `SOAP_UNAVAILABLE` | Fournisseur injoignable (DNS, TCP, TLS) |
-| 502 | `SOAP_INVALID_RESPONSE` | Réponse reçue mais inexploitable |
-| 504 | `SOAP_TIMEOUT` | Délai dépassé après toutes les reprises |
-| 500 | `INTERNAL_SERVER_ERROR` | Erreur non prévue — détail journalisé, jamais renvoyé |
+| Verdict | Signification |
+| --- | --- |
+| `VERIFIED` | Données intactes, inclusion confirmée par le contrat |
+| `PENDING_ANCHOR` | Données intactes, ancrage pas encore effectué |
+| `TAMPERED` | **Altération détectée** |
+| `NOT_SEALED` | Jamais scellée — aucune preuve disponible |
+| `CHAIN_UNAVAILABLE` | Contrôles hors chaîne concluants, nœud injoignable |
 
-Aucune trace d'exécution, requête SQL ni message de driver ne traverse la frontière HTTP.
+### Autres points d'entrée
+
+| Méthode | Route | Rôle |
+| --- | --- | --- |
+| `GET` | `/transfers` | Liste paginée, filtres `status` et `currency` |
+| `GET` | `/transfers/{ref}` | Statut d'un virement |
+| `GET` | `/transfers/{ref}/audit` | Piste d'audit (payloads XML masqués) |
+| `GET` | `/anchors/batches` | Lots d'ancrage et leurs transactions blockchain |
+| `GET` | `/anchors/batches/{id}` | Détail d'un lot |
+| `POST` | `/anchors/batches` | Ancrage immédiat (exploitation / démonstration) |
+| `GET` | `/anchors/statistics` | Répartition par état d'ancrage |
+| `GET` | `/health` | PostgreSQL, client SOAP, schémas XSD, blockchain |
 
 ---
 
-## Intégration SOAP
+## Le modèle de preuve
 
-### WSDL embarqué
+### Ce qui est scellé
 
-Le WSDL est versionné dans [`src/soap/wsdl/NumberConversion.wsdl`](src/soap/wsdl/NumberConversion.wsdl)
-et chargé depuis le disque. Trois bénéfices :
+Quand une transaction atteint un état terminal, la passerelle produit un document
+`TransferRecord` — l'état final complet, résultat de l'appel SOAP inclus — le valide contre
+`transfer-record.xsd`, puis calcule :
 
-- le démarrage de l'API ne dépend d'aucun appel réseau ;
-- les tests restent hermétiques ;
-- le contrat est figé — une modification côté fournisseur devient un diff Git, pas une surprise en production.
+```
+empreinte = keccak256( sel(32 octets) ‖ documentXmlCanonique )
+```
 
-`client.setEndpoint()` force ensuite l'adresse configurée, ce qui permet de viser un bouchon en recette
-sans toucher au WSDL.
+**Le document n'est pas conservé.** Il est reconstruit depuis la base au moment de la vérification,
+et c'est précisément cette reconstruction qui rend l'altération détectable.
 
-### Répartition des responsabilités
+#### Pourquoi un sel
 
-| Fichier | Responsabilité |
-| --- | --- |
-| `soap-client.service.ts` | Transport : création du client, timeout, reprises, capture de l'XML brut émis et reçu |
-| `soap-response.mapper.ts` | Analyse : gardes de sécurité, parsing, normalisation des fautes, extraction du résultat |
-| `exceptions/soap.exceptions.ts` | Traduction en exceptions du domaine (`Fault` / `Communication` / `Parsing`) |
+Un IBAN a une entropie faible : pays, banque et guichet suivent des formats publics, et un montant
+se devine souvent. Publier `keccak256(document)` exposerait la preuve à une attaque par force brute
+sur les préimages — il suffirait de tester des documents plausibles jusqu'à retrouver le condensat.
 
-Le client récupère l'XML brut via le tableau résolu par node-soap
-(`[result, rawResponse, soapHeader, rawRequest]`) et le confie au mapper : l'analyse de la réponse
-XML est donc réellement effectuée par le mapper, et la piste d'audit dispose des deux payloads.
+Chaque transaction reçoit donc un sel aléatoire de 32 octets, conservé en base et **jamais publié**.
+Conséquence secondaire utile : deux virements identiques n'exposent pas la même empreinte.
 
-### Gestion des fautes
+#### Pourquoi la canonicité est critique
 
-Un fournisseur SOAP signale une faute par un **HTTP 500 portant une enveloppe `<soap:Fault>`** —
-que node-soap remonte comme une erreur de transport. Le corps est donc repassé au mapper, qui
-applique les mêmes gardes et la même normalisation que sur le chemin nominal. Conséquence
-concrète : les entités XML sont correctement décodées (`---&gt;` → `--->`) dans le message rendu
-au client.
+L'empreinte porte sur les octets exacts du document. Le sérialiseur est donc déterministe par
+construction plutôt que canonicalisé après coup (C14N) : ordre imposé par le XSD, indentation fixe,
+fins de ligne LF, montants toujours à 2 décimales (`1250.7` → `1250.70`), dates ISO 8601 UTC,
+éléments optionnels vides omis. L'attribut `version` du document permettra de rejouer la
+vérification d'archives anciennes si le format évolue.
 
-Les formes SOAP 1.1 (`faultcode` / `faultstring`) et SOAP 1.2 (`Code/Value` + `Reason/Text`) sont
-normalisées vers une structure unique `SoapFaultDetails`. Le WSDL du fournisseur exposant les deux
-bindings, les deux cas sont couverts par les tests.
+### Ce qui est ancré
 
-### Politique de reprise
+Ancrer chaque virement individuellement ferait croître le coût linéairement. Les transactions sont
+donc regroupées en lots, et seule la **racine de Merkle** du lot est publiée : un mot de 32 octets,
+que le lot contienne 1 ou 1000 virements.
 
-Les reprises ne s'appliquent qu'aux **erreurs de communication**. Une `<soap:Fault>` est une réponse
-métier : la rejouer serait au mieux inutile, au pire un doublon de paiement. Un backoff linéaire
-(`SOAP_RETRY_DELAY_MS × tentative`) absorbe les indisponibilités brèves.
+```
+                     racine  ← publiée sur la chaîne
+                    /      \
+               h(01)        h(23)
+              /    \        /    \
+          feuille0  f1     f2     f3     feuille = keccak256(empreinte)
+```
 
-### Échantillons
+Chaque transaction conserve son **chemin de hashs frères** (preuve d'inclusion), de taille
+logarithmique. La vérification recalcule la racine depuis la feuille et la compare à celle publiée.
 
-Le dossier [`samples/`](samples/) contient les enveloppes réelles capturées ainsi que les payloads
-hostiles utilisés par les tests :
+Deux conventions rendent les preuves vérifiables indifféremment hors chaîne et par le contrat :
 
-| Fichier | Usage |
-| --- | --- |
-| `soap-request.xml` | Requête `NumberToDollars` émise |
-| `soap-response.xml` | Réponse nominale réelle (noter le préfixe `m:`) |
-| `soap-fault.xml` | Faute SOAP 1.1 |
-| `soap-fault-12.xml` | Même incident en SOAP 1.2 |
-| `soap-response-xxe.xml` | Déclaration d'entité externe — doit être rejetée |
+- **Paires triées** — `hash(a,b) = keccak256(min ‖ max)`, donc pas besoin de mémoriser les positions
+  gauche/droite. Conséquence assumée : l'ordre au sein d'une paire est perdu. L'arbre prouve
+  l'appartenance d'une transaction à un lot, pas son rang — ce qui suffit à l'audit.
+- **Promotion du nœud orphelin** — sur un niveau impair, le dernier nœud remonte tel quel. Le
+  dupliquer permettrait de forger une preuve d'inclusion pour un élément absent.
+- **Double hachage des feuilles** — `feuille = keccak256(empreinte)`, recommandation OpenZeppelin
+  contre la confusion entre une feuille et un nœud interne.
+
+### Le contrat `AuditAnchor`
+
+```solidity
+function anchorBatch(bytes32 batchId, bytes32 merkleRoot, uint64 leafCount) external onlySubmitter;
+function verifyInclusion(bytes32 batchId, bytes32 leaf, bytes32[] calldata proof) external view returns (bool);
+```
+
+Deux propriétés en font un registre d'audit plutôt qu'une table de hashs :
+
+1. **Immuabilité** — un lot déjà ancré ne peut jamais être réécrit (`BatchAlreadyAnchored`).
+   Corriger une erreur impose d'ancrer un nouveau lot, ce qui laisse trace des deux états.
+2. **Contrôle d'accès** — seuls les comptes déclarés `submitter` peuvent ancrer.
+
+`verifyInclusion` permet à un tiers de s'en remettre au seul contrat, sans faire confiance à
+l'implémentation de la passerelle.
+
+### Pourquoi la blockchain est indispensable ici
+
+Comparer l'empreinte recalculée à une empreinte stockée dans la même base ne prouve rien : qui
+modifie une ligne peut modifier l'empreinte. La chaîne apporte le point de référence que l'opérateur
+ne contrôle plus.
+
+Voici la défense en profondeur, telle que réellement exercée sur cette implémentation :
+
+| Ce que fait l'attaquant (accès total en écriture à la base) | Contrôle qui cède | Verdict |
+| --- | --- | --- |
+| Modifie l'IBAN du bénéficiaire | `fingerprintMatches` → `false` | `TAMPERED` |
+| …et réaligne l'empreinte stockée | `merkleProofValid` → `false` | `TAMPERED` |
+| …et forge une racine de Merkle cohérente | `onChainRootMatches` → `false` | `TAMPERED` |
+
+À la dernière ligne, tous les contrôles internes passent — et la chaîne tranche seule. Falsifier un
+virement supposerait de réécrire l'historique de la chaîne.
 
 ---
 
 ## Sécurité et confidentialité
 
-### Masquage des données sensibles
-
-`src/common/utils/masking.util.ts` applique trois niveaux :
-
-- **IBAN** → `FR76****0189` : pays et clé de contrôle conservés pour le diagnostic, corps du compte masqué ;
-- **secrets** (`password`, `token`, `authorization`, `apiKey`…) → `[REDACTED]` intégral ;
-- **texte libre et XML** → détection par motif, y compris hors des champs attendus.
-
-Ce dernier point est le plus important : un IBAN glissé dans un commentaire ou une balise non
-prévue est masqué quand même. La profondeur de récursion et la taille des tableaux sont bornées
-pour qu'une structure hostile ne puisse pas faire boucler le masquage.
+### Où vivent les IBAN complets
 
 | Destination | IBAN complet ? |
 | --- | --- |
 | Table `transactions` | **Oui** — nécessaire à l'exécution du virement |
-| Réponses HTTP | Non — masqué |
+| Document scellé (transitoire) | **Oui** — c'est l'objet de la preuve, jamais publié |
+| Réponses HTTP | Non — masqué `FR76****0189` |
 | Logs applicatifs | Non — masqué |
 | Table `audit_logs` | Non — masqué puis tronqué |
+| Blockchain | Non — seule une racine de Merkle y figure |
 
 Vérifié en exécution réelle : sur 445 lignes de log produites par un virement complet, **zéro**
-occurrence d'IBAN en clair, 9 occurrences de la forme masquée.
+occurrence d'IBAN en clair.
 
-### Durcissement du parseur XML
+Le masquage opère à trois niveaux (`src/common/utils/masking.util.ts`) : IBAN (`FR76****0189`),
+secrets (`[REDACTED]` intégral), et **texte libre / XML par détection de motif** — un IBAN glissé
+dans un commentaire ou une balise non prévue est masqué quand même.
 
-Un parseur XML est une surface d'attaque classique. Avant tout parsing, `SoapResponseMapper` rejette :
+### Durcissement des parseurs
 
-- `<!DOCTYPE` et `<!ENTITY` — XXE (lecture de fichiers locaux) et *billion laughs* ;
-- `<?xml-stylesheet` — chargement de ressource externe ;
-- toute réponse au-delà de `SOAP_MAX_RESPONSE_BYTES`.
+Un parseur XML est une surface d'attaque classique. Avant tout parsing, la couche SOAP rejette
+`<!DOCTYPE`, `<!ENTITY` (XXE et *billion laughs*), `<?xml-stylesheet`, et toute réponse au-delà de
+`SOAP_MAX_RESPONSE_BYTES`. Le rejet est explicite plutôt que délégué au comportement par défaut
+d'une dépendance tierce.
 
-Le rejet est explicite plutôt que délégué au comportement par défaut d'une dépendance tierce.
+Côté génération, l'échappement XML joue un double rôle : conformité du document, et neutralisation
+d'une injection. Un nom de bénéficiaire contenant `</creditorName>` ne peut pas restructurer le
+document — donc pas davantage détourner l'empreinte scellée.
 
 ### Autres mesures
 
-- `ValidationPipe` en `whitelist` + `forbidNonWhitelisted` : un champ hors contrat est un signe
-  d'erreur d'intégration, pas un extra à ignorer silencieusement ;
-- jeu de caractères SEPA imposé sur les libellés — rejette les caractères de contrôle et les
-  fragments réinjectables dans un flux XML ;
-- `helmet` pour les en-têtes HTTP ;
-- identifiant de corrélation fourni par l'appelant validé par motif (évite l'injection de log) ;
-- image Docker exécutée en utilisateur `node`, `dumb-init` pour la propagation de `SIGTERM`
-  (arrêt propre du pool PostgreSQL via `enableShutdownHooks`).
+- `ValidationPipe` en `whitelist` + `forbidNonWhitelisted` — un champ hors contrat est un signe
+  d'erreur d'intégration, pas un extra à ignorer ;
+- jeu de caractères SEPA imposé sur les libellés ;
+- validation d'environnement au démarrage, **sans jamais reproduire une valeur sensible** dans le
+  message d'erreur (la clé privée est signalée « valeur masquée ») ;
+- `helmet`, identifiant de corrélation validé par motif (anti-injection de log) ;
+- image Docker en utilisateur `node`, `dumb-init` pour la propagation de `SIGTERM`.
 
 ---
 
 ## Modèle de données
 
-### `transactions`
+**`transactions`** — référence et clé d'idempotence uniques, statut, IBAN, montant `numeric(18,2)`,
+métadonnées SOAP, puis les champs de scellement : `fingerprint`, `fingerprint_salt`,
+`record_format_version`, `sealed_at`, `anchor_status`, `batch_id`, `leaf_index`, `merkle_proof`
+(jsonb). Verrouillage optimiste via `@VersionColumn`.
 
-Référence unique, clé d'idempotence unique, statut (`PENDING` → `PROCESSING` → `COMPLETED` / `FAILED`),
-IBAN, montant `numeric(18,2)`, devise, montant en lettres, métadonnées SOAP (opération, durée,
-tentatives, code et motif de faute), `correlationId`, horodatages, et `@VersionColumn` pour le
-verrouillage optimiste.
+**`audit_logs`** — sens de l'échange (`DOCUMENT_VALIDATED`, `OUTBOUND_REQUEST`, `INBOUND_RESPONSE`,
+`INBOUND_FAULT`, `COMMUNICATION_ERROR`), payload masqué et tronqué, durée, code de faute,
+corrélation. Écriture *best-effort* : un échec d'audit ne fait jamais échouer la transaction métier.
 
-### `audit_logs`
-
-Sens de l'échange (`OUTBOUND_REQUEST`, `INBOUND_RESPONSE`, `INBOUND_FAULT`, `COMMUNICATION_ERROR`),
-issue, opération, payload masqué, taille du payload d'origine, durée, code de faute, corrélation.
-
-L'écriture d'audit est **best-effort** : un échec de persistance est journalisé mais ne fait jamais
-échouer la transaction métier.
+**`anchor_batches`** — statut, racine de Merkle, nombre de feuilles, `chain_id`, adresse du contrat,
+`tx_hash`, numéro de bloc, gaz consommé, tentatives, dernière erreur.
 
 ### Contrats XSD
 
-[`schemas/transfer-request.xsd`](schemas/transfer-request.xsd) et
-[`schemas/transfer-response.xsd`](schemas/transfer-response.xsd) formalisent le contrat pour les
-intégrateurs travaillant en XML ou générant des stubs. Les décorateurs `class-validator` en sont la
-transposition exécutable.
+| Schéma | Rôle |
+| --- | --- |
+| `transfer-request.xsd` | Demande — **validé à l'exécution** avant l'appel SOAP |
+| `transfer-record.xsd` | Enregistrement scellé — **validé à l'exécution** avant hachage |
+| `transfer-response.xsd` | Contrat de sortie de l'API — documentaire |
 
-La clé de contrôle MOD 97-10 n'étant pas exprimable en XSD 1.0, elle reste vérifiée
-par `IsIbanConstraint` — le XSD ne valide que la structure.
+La clé de contrôle MOD 97-10 n'étant pas exprimable en XSD 1.0, elle reste vérifiée par
+`IsIbanConstraint` : le XSD ne valide que la structure.
 
 ---
 
 ## Tests
 
 ```bash
-npm test          # 108 tests unitaires
-npm run test:e2e  # 34 tests d'intégration (PostgreSQL requis)
+npm test          # 165 tests unitaires
+npm run test:e2e  #  58 tests d'intégration (PostgreSQL requis)
 npm run test:cov  # couverture
 ```
 
-Les tests e2e utilisent la base `banking_soap_test` et **bouchonnent le client SOAP** : ils sont
-déterministes et hors ligne, y compris pour les scénarios de faute et de timeout.
-
-```bash
-createdb banking_soap_test
-psql -d banking_soap_test -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
-```
+Les tests e2e utilisent `banking_soap_test`, bouchonnent le client SOAP, et remplacent la chaîne par
+un registre en mémoire qui reproduit fidèlement le contrat (refus de réécriture, vérification
+d'inclusion par recalcul). Ils sont donc **déterministes et hors ligne**, y compris pour les
+scénarios de faute, de timeout et de falsification.
 
 Couverture notable :
 
-- **IBAN** — 9 pays valides, clé de contrôle altérée, longueur pays non conforme, entrées hostiles ;
-- **Masquage** — fuite via clé inattendue, texte libre, XML préfixé, structures profondes ;
-- **Mapper** — réponse réelle, préfixes de namespace variables, fautes 1.1 et 1.2, `<soap:Fault/>` vide,
-  XXE, *billion laughs*, dépassement de taille, XML malformé, enveloppe ou résultat absents ;
-- **Service** — ordre de persistance avant appel externe, idempotence (rejeu et course), collision
-  de référence, chaque mode d'échec SOAP, non-divulgation du détail technique ;
-- **e2e** — cycle complet, validation, idempotence, 502/504 avec référence consultable, pagination,
-  audit masqué, corrélation, santé.
+- **Merkle** — tailles 1 à 1024 dont impaires, preuve tronquée / allongée / altérée, feuille
+  étrangère, racine falsifiée, déterminisme, propriété des paires triées ;
+- **Scellement** — sensibilité au centime près, unicité des sels, rejet des sels malformés,
+  caractères non-ASCII ;
+- **Canonicité** — indépendance vis-à-vis de l'ordre de construction de l'objet, injection XML ;
+- **Intégrité** — 5 champs falsifiés indépendamment, plus les trois niveaux d'attaque en cascade ;
+- **Résilience** — chaîne injoignable distinguée d'une altération, remise en file après échec.
 
-Deux tests ont mis en évidence de vrais défauts pendant le développement, corrigés depuis :
+### Défauts réels trouvés par les tests
 
-1. un `<soap:Fault/>` vide n'était pas reconnu comme faute (xml2js le rend en chaîne vide) ;
+Cinq bugs authentiques ont été détectés et corrigés pendant le développement :
+
+1. `<soap:Fault/>` vide non reconnu comme faute (xml2js le rend en chaîne vide) ;
 2. après résolution d'une course d'idempotence, la transaction gagnante était retraitée — soit un
-   **second appel SOAP pour un seul virement**.
+   **second appel SOAP pour un seul virement** ;
+3. entités XML non décodées (`---&gt;`) dans le message d'erreur rendu au client ;
+4. **collision de nonce** sur deux ancrages rapprochés : `ethers` met en cache
+   `eth_getTransactionCount`, d'où un rejet « nonce too low ». Corrigé par `NonceManager` ;
+5. le test « l'ordre des feuilles change la racine » était **faux** — avec des paires triées,
+   échanger deux frères ne change rien. La propriété a été documentée plutôt que contournée.
 
 ---
 
 ## Validation en conditions réelles
 
-Au-delà des tests, les chemins suivants ont été exercés contre le vrai service public et contre un
-bouchon local :
+Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et un bouchon SOAP :
 
 | Scénario | Résultat observé |
 | --- | --- |
-| Virement nominal, service DataAccess réel | `201` · `COMPLETED` · `"one thousand two hundred and fifty dollars and seventy five cents"` · 1865 ms |
-| Rejeu avec la même `Idempotency-Key` | Référence identique, **aucun** second appel SOAP |
-| Timeout (`SOAP_TIMEOUT_MS=100`) | `504 SOAP_TIMEOUT` · 3 tentatives · statut `FAILED` · audit `COMMUNICATION_ERROR` |
-| Faute SOAP 1.1 (bouchon, HTTP 500) | `502 SOAP_FAULT` · **aucune** reprise · `faultCode` persisté |
-| Faute SOAP 1.2 (bouchon) | Normalisée vers la même structure, `soapVersion: "1.2"` |
-| Configuration invalide au boot | Démarrage refusé avec le motif exact |
-| Fuite d'IBAN (logs + base d'audit) | Aucune |
-
----
-
-## Migrations
-
-`DB_SYNCHRONIZE` est réservé au développement. En production :
-
-```bash
-npm run migration:generate -- src/database/migrations/InitialSchema
-npm run migration:run
-npm run migration:revert
-```
-
-La `DataSource` de la CLI est `src/database/data-source.ts`.
+| Virement nominal, service public réel | `201 COMPLETED` · *"one thousand two hundred and fifty dollars and seventy five cents"* · 1865 ms |
+| Rejeu avec la même `Idempotency-Key` | Référence identique, aucun second appel SOAP |
+| Timeout SOAP (`SOAP_TIMEOUT_MS=100`) | `504 SOAP_TIMEOUT` · 3 tentatives · `FAILED` |
+| Faute SOAP 1.1 et 1.2 (bouchon HTTP 500) | `502 SOAP_FAULT` · aucune reprise · faute persistée |
+| Arbre de Merkle vs `verifyInclusion` du contrat | Concordance sur 1, 2, 3, 5, 8 et 17 feuilles ; intrus rejeté |
+| Réécriture d'un lot déjà ancré | Rejetée — `BatchAlreadyAnchored` |
+| Ancrage par un compte non autorisé | Rejeté — `NotAuthorized` |
+| Ancrage de 3 virements | 1 transaction chaîne, bloc 10, **121 159 gaz** |
+| Falsification en base (3 niveaux) | `TAMPERED` aux trois niveaux (voir tableau plus haut) |
+| Fuite d'IBAN (logs + audit) | Aucune |
 
 ---
 
 ## Arborescence
 
 ```
-banking-soap-integration-demo/
+├── contracts/AuditAnchor.sol       # Registre d'ancrage (Solidity)
+├── scripts/                        # Compilation (solc) et déploiement (ethers)
 ├── src/
-│   ├── transactions/          # Domaine métier
-│   │   ├── transactions.controller.ts
-│   │   ├── transactions.service.ts      ← orchestration
-│   │   ├── transactions.repository.ts
-│   │   ├── reference.generator.ts
-│   │   ├── entities/ · enums/ · dto/
-│   ├── soap/                  # Couche anti-corruption
-│   │   ├── soap-client.service.ts       ← transport, reprises
-│   │   ├── soap-response.mapper.ts      ← analyse XML, fautes
-│   │   ├── exceptions/ · wsdl/
-│   ├── audit/                 # Piste d'audit
-│   ├── common/
-│   │   ├── filters/           # Enveloppe d'erreur unique
-│   │   ├── interceptors/      # Journalisation masquée
-│   │   ├── validators/        # IsIban, IsMonetaryAmount
-│   │   ├── middleware/ · context/ · utils/ · dto/
-│   ├── config/                # Configuration typée + validation d'env
-│   ├── database/ · health/
-│   ├── app.module.ts · main.ts
-├── schemas/                   # transfer-request.xsd, transfer-response.xsd
-├── samples/                   # Enveloppes réelles + payloads hostiles
-├── test/                      # Tests d'intégration
-├── docker/postgres/init/
-├── docker-compose.yml · Dockerfile
-├── .env.example · README.md
+│   ├── transactions/               # Domaine métier — orchestration du virement
+│   ├── soap/                       # Couche anti-corruption SOAP
+│   │   ├── soap-client.service.ts  #   transport, timeout, reprises
+│   │   ├── soap-response.mapper.ts #   analyse XML, normalisation des fautes
+│   │   └── wsdl/                   #   WSDL embarqué (aucun appel réseau au boot)
+│   ├── xml/                        # Sérialisation canonique + validation XSD
+│   │   ├── transfer-xml.builder.ts
+│   │   └── xsd-validator.service.ts
+│   ├── blockchain/                 # Scellement, ancrage Merkle, vérification
+│   │   ├── fingerprint.util.ts     #   sel + keccak256 + dérivation de feuille
+│   │   ├── merkle.util.ts          #   arbre et preuves, compatibles OpenZeppelin
+│   │   ├── anchor.service.ts       #   lots, planification, reprises
+│   │   ├── evm-anchor.client.ts    #   ethers ↔ contrat
+│   │   └── integrity-verification.service.ts
+│   ├── audit/ · common/ · config/ · database/ · health/
+├── schemas/                        # transfer-request · transfer-record · transfer-response
+├── samples/                        # Enveloppes SOAP réelles + payloads hostiles
+├── test/                           # transfers.e2e-spec · integrity.e2e-spec
+└── docker-compose.yml · Dockerfile
 ```
 
 ---
@@ -452,13 +468,19 @@ banking-soap-integration-demo/
 
 Ce dépôt est une démonstration d'intégration, pas un service de paiement.
 
-- **Aucune authentification.** Une mise en production exigerait au minimum OAuth2/mTLS, une
-  autorisation par scope et une limitation de débit.
-- **Aucun débit réel.** Le service SOAP ne fait que convertir un montant en lettres ; il ne
-  contacte aucun système de règlement.
-- **Traitement synchrone.** Un vrai back-office bancaire répond en quelques secondes à quelques
-  minutes : le modèle cible serait une file de messages avec reprise durable, plutôt qu'un appel
-  bloquant dans le cycle HTTP.
-- **IBAN stockés en clair.** En production, ils relèveraient d'un chiffrement au repos ou d'un
-  coffre à jetons.
+- **Aucune authentification.** Une mise en production exigerait OAuth2/mTLS, une autorisation par
+  scope et une limitation de débit.
+- **Aucun débit réel.** Le service SOAP convertit un montant en lettres ; il ne contacte aucun
+  système de règlement.
+- **Clé privée en variable d'environnement.** Acceptable sur une chaîne locale jetable dont le
+  compte #0 est public. En production, la signature relèverait d'un HSM ou d'un KMS.
+- **Chaîne locale.** Un registre réellement inviolable suppose une chaîne publique ou un consortium
+  dont l'opérateur ne contrôle pas les validateurs. L'architecture est prête — `EvmAnchorClient`
+  isole entièrement ethers — mais un testnet public introduirait une dépendance à un faucet et à un
+  fournisseur RPC.
+- **Traitement synchrone du virement.** Le modèle cible serait une file de messages avec reprise
+  durable plutôt qu'un appel bloquant dans le cycle HTTP.
+- **IBAN stockés en clair.** En production, chiffrement au repos ou coffre à jetons.
 - **Pas de purge.** La piste d'audit croît indéfiniment ; une politique de rétention serait requise.
+- **Pas de vérification en masse.** Le contrôle est unitaire ; un audit de bout en bout supposerait
+  une revérification par lot.
