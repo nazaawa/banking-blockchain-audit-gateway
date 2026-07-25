@@ -108,7 +108,7 @@ describe('Mobile Money (e2e)', () => {
     expect(convertAmountToWords).not.toHaveBeenCalled();
   });
 
-  it('confirme, appelle SOAP, rapproche puis scelle le seul etat MATCHED', async () => {
+  it('confirme, appelle SOAP, rapproche puis consigne les faits au registre', async () => {
     const initiated = await initiate();
     const response = await request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${initiated.body.aggregatorReference}/confirm`)
@@ -124,14 +124,20 @@ describe('Mobile Money (e2e)', () => {
     });
     expect(convertAmountToWords).toHaveBeenCalledTimes(1);
 
-    const [stored] = await dataSource.query<Array<{ fingerprint: string | null }>>(
-      'SELECT fingerprint FROM transactions WHERE reference = $1',
+    // La preuve n'est plus un instantane de la ligne : chaque fait du registre
+    // porte la sienne, scellee des l'insertion.
+    const events = await dataSource.query<Array<{ event_type: string; fingerprint: string }>>(
+      'SELECT event_type, fingerprint FROM transaction_events WHERE transaction_reference = $1 ' +
+        'ORDER BY sequence',
       [initiated.body.reference],
     );
-    expect(stored.fingerprint).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(events.map((e) => e.event_type)).toEqual(
+      expect.arrayContaining(['PAYMENT_INITIATED', 'RECONCILIATION_MATCHED', 'CASE_CLOSED']),
+    );
+    expect(events.every((e) => /^0x[0-9a-f]{64}$/.test(e.fingerprint))).toBe(true);
   });
 
-  it('scelle un ecart et n instruit jamais la banque', async () => {
+  it('consigne un ecart et n instruit jamais la banque', async () => {
     const initiated = await initiate();
     const response = await request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${initiated.body.aggregatorReference}/confirm`)
@@ -155,9 +161,12 @@ describe('Mobile Money (e2e)', () => {
       initiated.body.reference,
     ]);
 
-    // Le litige est desormais ancrable : c'est le dossier qui a le plus besoin
-    // d'une preuve opposable.
-    expect(stored.fingerprint).not.toBeNull();
+    // La preuve du litige vit desormais dans le registre append-only.
+    const [{ count }] = await dataSource.query<Array<{ count: number }>>(
+      'SELECT COUNT(*)::int AS count FROM transaction_events WHERE transaction_reference = $1',
+      [initiated.body.reference],
+    );
+    expect(count).toBeGreaterThan(0);
     // Et la jambe bancaire n'est jamais partie sur un montant non confirme.
     expect(stored.bank_status).toBe(BankProcessingStatus.BLOCKED);
     expect(stored.refund_status).toBe(RefundStatus.REQUIRED);
@@ -205,7 +214,7 @@ describe('Mobile Money (e2e)', () => {
     expect(convertAmountToWords).not.toHaveBeenCalled();
   });
 
-  it('n appelle ni SOAP ni la blockchain apres un rejet operateur', async () => {
+  it('n appelle pas SOAP et clot proprement apres un rejet operateur', async () => {
     const initiated = await initiate();
     const response = await request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${initiated.body.aggregatorReference}/confirm`)
@@ -221,5 +230,11 @@ describe('Mobile Money (e2e)', () => {
       caseStatus: CaseStatus.NONE,
     });
     expect(convertAmountToWords).not.toHaveBeenCalled();
+
+    const events = await dataSource.query<Array<{ event_type: string }>>(
+      'SELECT event_type FROM transaction_events WHERE transaction_reference = $1 ORDER BY sequence',
+      [initiated.body.reference],
+    );
+    expect(events.at(-1)?.event_type).toBe('CASE_CLOSED');
   });
 });

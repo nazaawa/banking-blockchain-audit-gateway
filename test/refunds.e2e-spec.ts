@@ -308,7 +308,7 @@ describe('Remboursement (e2e)', () => {
 
       const report = (
         await request(app.getHttpServer())
-          .get(`/api/v1/transfers/${reference}/events/verification`)
+          .get(`/api/v1/transfers/${reference}/verification`)
           .set('Authorization', E2E_AUTHORIZATION)
           .expect(200)
       ).body as Record<string, any>;

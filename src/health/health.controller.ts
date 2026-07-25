@@ -66,7 +66,7 @@ export class HealthController {
     };
 
     // L'ancrage desactive n'est pas une panne : c'est un mode d'exploitation
-    // assume, ou les transactions restent scellees sans etre publiees.
+    // assume, ou les faits restent scelles sans etre publies.
     const healthy =
       database.status === 'up' &&
       soapClient.status === 'up' &&

@@ -335,6 +335,9 @@ export class MobileMoneyService {
       observedCurrency: webhook.currency,
       detail: webhook.failureReason ?? 'Paiement refuse par l operateur',
     });
+    // Aucun fonds n'a ete encaisse et aucune jambe bancaire n'a ete lancee :
+    // ce refus est une issue finale, donc sa synthese peut etre ancree.
+    await this.events.closeCase(updated, 'Dossier clos apres refus de l operateur');
     return updated;
   }
 

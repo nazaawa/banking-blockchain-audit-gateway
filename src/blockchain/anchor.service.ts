@@ -4,16 +4,13 @@ import { SchedulerRegistry } from '@nestjs/schedule';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, QueryRunner, Repository } from 'typeorm';
 import { anchorConfig, blockchainConfig } from '../config/configuration';
-import { SCHEMAS, XsdValidatorService } from '../xml/xsd-validator.service';
-import { TransferXmlBuilder } from '../xml/transfer-xml.builder';
 import { Transaction } from '../transactions/entities/transaction.entity';
-import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
-import { PaymentChannel, ReconciliationStatus } from '../mobile-money/enums/mobile-money.enum';
 import { TransactionEvent } from '../events/entities/transaction-event.entity';
+import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { AnchorBatch } from './entities/anchor-batch.entity';
 import { AnchorStatus, BatchStatus } from './enums/anchor-status.enum';
 import { EvmAnchorClient } from './evm-anchor.client';
-import { computeFingerprint, generateSalt, toLeaf } from './fingerprint.util';
+import { toLeaf } from './fingerprint.util';
 import { buildMerkleTree, getProof } from './merkle.util';
 
 /** Resultat de la constitution et de l'ancrage d'un lot. */
@@ -24,25 +21,6 @@ export interface BatchOutcome {
 }
 
 const ANCHOR_JOB = 'anchor-pending-transactions';
-
-/**
- * Issues de rapprochement considerees comme definitives.
- *
- * `PENDING` (ou l'absence de valeur) signale un dossier encore ouvert : le
- * sceller figerait un etat susceptible d'evoluer.
- */
-const SETTLED_RECONCILIATION: ReadonlySet<ReconciliationStatus | null> = new Set([
-  ReconciliationStatus.MATCHED,
-  ReconciliationStatus.MISMATCH,
-  ReconciliationStatus.AMOUNT_MISMATCH,
-  ReconciliationStatus.CURRENCY_MISMATCH,
-  ReconciliationStatus.NOT_APPLICABLE,
-  ReconciliationStatus.MANUAL_REVIEW,
-]);
-/** Meme ensemble, sous forme de liste : le SQL ne sait pas interroger un Set. */
-const SETTLED_RECONCILIATION_VALUES = [...SETTLED_RECONCILIATION].filter(
-  (status): status is ReconciliationStatus => status !== null,
-);
 
 /** Verrou PostgreSQL partage par toutes les instances de la passerelle. */
 const ANCHOR_ADVISORY_LOCK_ID = 1_111_577_675;
@@ -105,8 +83,6 @@ export class AnchorService implements OnModuleInit {
     private readonly events: Repository<TransactionEvent>,
     @InjectDataSource()
     private readonly dataSource: DataSource,
-    private readonly xmlBuilder: TransferXmlBuilder,
-    private readonly xsdValidator: XsdValidatorService,
     private readonly client: EvmAnchorClient,
     private readonly scheduler: SchedulerRegistry,
     @Inject(blockchainConfig.KEY)
@@ -119,7 +95,7 @@ export class AnchorService implements OnModuleInit {
     if (!this.chain.enabled) {
       this.logger.warn({
         event: 'anchor.disabled',
-        detail: 'BLOCKCHAIN_ENABLED=false — les transactions sont scellees mais jamais ancrees',
+        detail: 'BLOCKCHAIN_ENABLED=false — les faits sont scelles mais jamais ancres',
       });
       return;
     }
@@ -141,79 +117,22 @@ export class AnchorService implements OnModuleInit {
   // Scellement
   // -------------------------------------------------------------------------
 
-  /**
-   * Scelle une transaction parvenue a un etat terminal.
-   *
-   * Produit le document XML canonique, le valide contre `transfer-record.xsd`,
-   * puis calcule l'empreinte salee. Le document lui-meme n'est pas conserve : il
-   * est reconstructible a l'identique depuis la base, et c'est precisement cette
-   * reconstruction qui permet de detecter une alteration.
-   *
-   * N'echoue jamais le virement : un defaut de scellement est journalise et la
-   * transaction reste `NOT_SEALED`.
-   */
-  async sealTransaction(transaction: Transaction): Promise<Transaction> {
-    if (
-      transaction.status !== TransactionStatus.COMPLETED &&
-      transaction.status !== TransactionStatus.FAILED
-    ) {
-      return transaction;
-    }
-    // Une transaction Mobile Money n'est figee qu'une fois son rapprochement
-    // tranche : tant qu'il est PENDING, l'issue peut encore changer.
-    //
-    // MISMATCH et MANUAL_REVIEW sont en revanche des issues definitives, et
-    // doivent etre scellees au meme titre qu'un MATCHED. Les exclure privait de
-    // preuve opposable exactement les dossiers qui en ont le plus besoin : un
-    // ecart de montant ou un refus operateur — c'est-a-dire les litiges.
-    if (
-      transaction.paymentChannel === PaymentChannel.MOBILE_MONEY &&
-      !SETTLED_RECONCILIATION.has(transaction.reconciliationStatus)
-    ) {
-      return transaction;
-    }
-    if (transaction.fingerprint !== null) return transaction;
-
-    try {
-      const recordXml = this.xmlBuilder.buildTransferRecord(transaction);
-      await this.xsdValidator.assertValid(recordXml, SCHEMAS.transferRecord);
-
-      const salt = generateSalt();
-      transaction.fingerprintSalt = salt;
-      transaction.fingerprint = computeFingerprint(salt, recordXml);
-      transaction.recordFormatVersion = this.xmlBuilder.getRecordFormatVersion(transaction);
-      transaction.sealedAt = new Date();
-      transaction.anchorStatus = AnchorStatus.PENDING;
-
-      const sealed = await this.transactions.save(transaction);
-
-      this.logger.log({
-        event: 'transaction.sealed',
-        reference: sealed.reference,
-        fingerprint: sealed.fingerprint,
-      });
-
-      return sealed;
-    } catch (error) {
-      this.logger.error({
-        event: 'transaction.seal.failed',
-        reference: transaction.reference,
-        reason: error instanceof Error ? error.message : 'erreur inconnue',
-      });
-      return transaction;
-    }
-  }
-
-  // -------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Ancrage
+  //
+  // Le scellement d'instantane a ete retire : le registre append-only le
+  // remplace. Une preuve d'etat courant ne disait que « voici a quoi la ligne
+  // ressemble » ; la chaine de faits prouve ce qui s'est produit, et son controle
+  // confronte en plus la ligne a ce que l'ouverture a consigne.
+  // ---------------------------------------------------------------------------
   // -------------------------------------------------------------------------
 
   /**
-   * Constitue un lot avec les transactions scellees en attente, publie sa racine
-   * sur la chaine, puis persiste la preuve d'inclusion de chaque transaction.
+   * Constitue un lot avec les clotures en attente, publie sa racine sur la
+   * chaine, puis persiste leur preuve d'inclusion.
    *
    * Protege contre les executions concurrentes : le declencheur periodique et un
-   * appel manuel ne doivent pas ancrer deux fois les memes transactions.
+   * appel manuel ne doivent pas ancrer deux fois les memes clotures.
    */
   async processPendingBatch(): Promise<BatchOutcome> {
     if (!this.chain.enabled) return { batch: null, anchored: 0, reason: 'ANCHORING_DISABLED' };
@@ -254,40 +173,27 @@ export class AnchorService implements OnModuleInit {
       const events = manager.getRepository(TransactionEvent);
       const batches = manager.getRepository(AnchorBatch);
 
-      const pendingTransactions = await transactions
-        .createQueryBuilder('transaction')
+      // Le scellement d'instantane ayant ete retire, plus aucune transaction
+      // n'entre en file : le lot ne couvre desormais que les faits du registre.
+      // La structure reste generique, les lots anterieurs contenant encore des
+      // transactions devant pouvoir etre repris a l'identique.
+      const pendingTransactions: Transaction[] = [];
+
+      const pendingEvents = await events
+        .createQueryBuilder('event')
         .setLock('pessimistic_write')
         .setOnLocked('skip_locked')
-        .where('transaction.anchorStatus = :status', { status: AnchorStatus.PENDING })
-        .andWhere('transaction.fingerprint IS NOT NULL')
-        // Meme regle que le scellement : toute issue tranchee est ancrable, y
-        // compris un ecart. Restreindre a MATCHED laissait les litiges scelles
-        // mais jamais publies — le lot ne les ramassait tout simplement pas.
-        .andWhere(
-          '(transaction.paymentChannel != :mobileMoney OR transaction.reconciliationStatus IN (:...settled))',
-          {
-            mobileMoney: PaymentChannel.MOBILE_MONEY,
-            settled: SETTLED_RECONCILIATION_VALUES,
-          },
-        )
-        .andWhere('transaction.batchId IS NULL')
-        .orderBy('transaction.sealedAt', 'ASC')
+        .where('event.anchorStatus = :status', { status: AnchorStatus.PENDING })
+        // La cloture engage recursivement tout l'historique via son
+        // previousFingerprint. Ancrer les faits intermediaires dupliquerait les
+        // preuves et publierait un etat encore susceptible d'evoluer.
+        .andWhere('event.eventType = :eventType', {
+          eventType: TransactionEventType.CASE_CLOSED,
+        })
+        .andWhere('event.batchId IS NULL')
+        .orderBy('event.createdAt', 'ASC')
         .take(this.config.batchMaxSize)
         .getMany();
-
-      const remaining = this.config.batchMaxSize - pendingTransactions.length;
-      const pendingEvents =
-        remaining <= 0
-          ? []
-          : await events
-              .createQueryBuilder('event')
-              .setLock('pessimistic_write')
-              .setOnLocked('skip_locked')
-              .where('event.anchorStatus = :status', { status: AnchorStatus.PENDING })
-              .andWhere('event.batchId IS NULL')
-              .orderBy('event.createdAt', 'ASC')
-              .take(remaining)
-              .getMany();
 
       const items: BatchItems = { transactions: pendingTransactions, events: pendingEvents };
       const total = countItems(items);
@@ -402,6 +308,16 @@ export class AnchorService implements OnModuleInit {
         { id: In(items.events.map((item) => item.id)) },
         { anchorStatus: status },
       );
+
+      // `transactions.anchor_status` reste la source de l'indicateur public
+      // historique `anchored`. Il ne porte plus la preuve elle-meme : on y
+      // projette seulement le statut de la cloture, sans batch ni chemin Merkle.
+      const closedReferences = items.events
+        .filter((event) => event.eventType === TransactionEventType.CASE_CLOSED)
+        .map((event) => event.transactionReference);
+      if (closedReferences.length > 0) {
+        await transactions.update({ reference: In(closedReferences) }, { anchorStatus: status });
+      }
     }
   }
 
@@ -610,13 +526,25 @@ export class AnchorService implements OnModuleInit {
     return Object.fromEntries(rows.map((row) => [row.status, Number.parseInt(row.count, 10)]));
   }
 
-  /** Repartition des transactions par etat d'ancrage. */
+  /**
+   * Repartition des dossiers par etat de leur preuve finale.
+   *
+   * Les nouvelles operations prennent le statut de leur evenement CASE_CLOSED.
+   * Les archives anterieures a la migration conservent celui de l'instantane de
+   * transaction, afin que la supervision ne perde pas leur preuve historique.
+   */
   async getStatistics(): Promise<Record<string, number>> {
     const rows = await this.transactions
       .createQueryBuilder('t')
-      .select('t.anchor_status', 'status')
+      .leftJoin(
+        TransactionEvent,
+        'closure',
+        'closure.transaction_reference = t.reference AND closure.event_type = :eventType',
+        { eventType: TransactionEventType.CASE_CLOSED },
+      )
+      .select('COALESCE(closure.anchor_status::text, t.anchor_status::text)', 'status')
       .addSelect('COUNT(*)', 'count')
-      .groupBy('t.anchor_status')
+      .groupBy('COALESCE(closure.anchor_status::text, t.anchor_status::text)')
       .getRawMany<{ status: string; count: string }>();
 
     return Object.fromEntries(rows.map((row) => [row.status, Number.parseInt(row.count, 10)]));

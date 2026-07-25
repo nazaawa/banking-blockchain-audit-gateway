@@ -141,6 +141,7 @@ describe('MobileMoneyService — garde-fou sur le montant confirme', () => {
       refundStatus: RefundStatus.NOT_REQUIRED,
       caseStatus: CaseStatus.NONE,
     });
+    expect(eventLedger.closeCase).toHaveBeenCalledTimes(1);
   });
 
   it('conserve la trace des deux montants pour le traitement humain', async () => {
@@ -179,5 +180,6 @@ describe('MobileMoneyService — garde-fou sur le montant confirme', () => {
     );
 
     expect(eventLedger.record).not.toHaveBeenCalled();
+    expect(eventLedger.closeCase).not.toHaveBeenCalled();
   });
 });

@@ -31,11 +31,13 @@ interface EventBody {
 interface VerificationBody {
   verdict: string;
   closed: boolean;
+  finalProofAnchored: boolean;
   declaredEventCount: number | null;
   eventCount: number;
   anchoredCount: number;
   head: string | null;
   events: Array<{
+    eventType: string;
     anchorVerified: boolean | null;
     fingerprintMatches: boolean;
   }>;
@@ -196,7 +198,7 @@ describe('Registre d evenements (e2e)', () => {
 
   const verifyChain = async (reference: string): Promise<VerificationBody> => {
     const response = await request(app.getHttpServer())
-      .get(`/api/v1/transfers/${reference}/events/verification`)
+      .get(`/api/v1/transfers/${reference}/verification`)
       .set('Authorization', E2E_AUTHORIZATION)
       .expect(200);
     return response.body as VerificationBody;
@@ -280,7 +282,7 @@ describe('Registre d evenements (e2e)', () => {
   // ==========================================================================
 
   describe('Ancrage', () => {
-    it('ancre transactions et evenements dans un meme lot', async () => {
+    it('n ancre que la cloture qui engage tout le registre', async () => {
       const { reference, aggregator } = await initiate();
       await confirm(aggregator, 1250.75);
 
@@ -290,13 +292,28 @@ describe('Registre d evenements (e2e)', () => {
       expect(chain.batches.size).toBe(1);
 
       const events = await chainOf(reference);
-      expect(events.every((e) => e.anchorStatus === 'ANCHORED')).toBe(true);
-      // Un seul lot couvre les deux natures d elements : le cout on-chain reste
-      // celui d une unique ecriture de 32 octets.
-      expect(events.every((e) => e.batchId === outcome.batch?.id)).toBe(true);
+      const anchored = events.filter((event) => event.anchorStatus === 'ANCHORED');
+      expect(anchored).toHaveLength(1);
+      expect(anchored[0]).toMatchObject({
+        eventType: 'CASE_CLOSED',
+        batchId: outcome.batch?.id,
+      });
+      expect(outcome.anchored).toBe(1);
+
+      const transaction = await request(app.getHttpServer())
+        .get(`/api/v1/mobile-money/transactions/${reference}`)
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(200);
+      expect(transaction.body.anchored).toBe(true);
+
+      const statistics = await request(app.getHttpServer())
+        .get('/api/v1/anchors/statistics')
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(200);
+      expect(statistics.body).toMatchObject({ ANCHORED: 1 });
     });
 
-    it('produit une preuve d inclusion valide pour chaque fait', async () => {
+    it('produit une preuve d inclusion pour la synthese finale', async () => {
       const { reference, aggregator } = await initiate();
       await confirm(aggregator, 1250.75);
       await anchorService.processPendingBatch();
@@ -304,19 +321,24 @@ describe('Registre d evenements (e2e)', () => {
       const report = await verifyChain(reference);
 
       expect(report.verdict).toBe('VERIFIED');
-      expect(report.anchoredCount).toBe(report.eventCount);
-      expect(report.events.every((event) => event.anchorVerified === true)).toBe(true);
+      expect(report.finalProofAnchored).toBe(true);
+      expect(report.anchoredCount).toBe(1);
+      expect(report.events.at(-1)).toMatchObject({
+        eventType: 'CASE_CLOSED',
+        anchorVerified: true,
+      });
     });
 
-    it('ancre aussi les faits d un dossier litigieux', async () => {
+    it('n ancre pas un dossier litigieux avant son remboursement', async () => {
       const { reference, aggregator } = await initiate(1250.75);
       await confirm(aggregator, 1.0);
 
-      await anchorService.processPendingBatch();
+      const outcome = await anchorService.processPendingBatch();
       const report = await verifyChain(reference);
 
-      // C est le dossier qui a le plus besoin d une preuve opposable.
-      expect(report.verdict).toBe('VERIFIED');
+      expect(outcome).toMatchObject({ anchored: 0, reason: 'NOTHING_TO_ANCHOR' });
+      expect(report.verdict).toBe('PARTIALLY_ANCHORED');
+      expect(report.finalProofAnchored).toBe(false);
       expect(report.eventCount).toBeGreaterThanOrEqual(4);
     });
   });
@@ -418,9 +440,13 @@ describe('Registre d evenements (e2e)', () => {
       expect(report.events.every((event) => event.fingerprintMatches)).toBe(true);
     });
 
-    it('retourne EMPTY pour une transaction sans fait consigne', async () => {
-      const report = await verifyChain('TRF-20260725-ZZZZZZZZ');
-      expect(report.verdict).toBe('EMPTY');
+    it('retourne 404 pour une reference inconnue', async () => {
+      // La verification est desormais le point d entree canonique d integrite :
+      // elle se comporte comme les autres routes /transfers/:reference.
+      await request(app.getHttpServer())
+        .get('/api/v1/transfers/TRF-20260725-ZZZZZZZZ/verification')
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(404);
     });
 
     it('expose le sommet de chaine, resume de tout l historique', async () => {

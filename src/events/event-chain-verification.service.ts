@@ -11,7 +11,13 @@ import type { TransactionEvent } from './entities/transaction-event.entity';
 import { TransactionEventType } from './enums/transaction-event.enum';
 import { TransactionEventsService } from './transaction-events.service';
 import { Transaction } from '../transactions/entities/transaction.entity';
-import { ReconciliationStatus, RefundStatus } from '../mobile-money/enums/mobile-money.enum';
+import {
+  PaymentChannel,
+  ProviderStatus,
+  ReconciliationStatus,
+  RefundStatus,
+} from '../mobile-money/enums/mobile-money.enum';
+import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
 
 /** Verdict porte sur un maillon de la chaine. */
 export interface EventVerification {
@@ -34,6 +40,13 @@ export interface EventChainReport {
   verdict: 'VERIFIED' | 'TAMPERED' | 'PARTIALLY_ANCHORED' | 'EMPTY' | 'CHAIN_UNAVAILABLE';
   /** Le dossier porte-t-il une preuve de synthese ? */
   closed: boolean;
+  /** La preuve de synthese finale est-elle confirmee sur la chaine ? */
+  finalProofAnchored: boolean;
+  /**
+   * La ligne `transactions` correspond-elle encore a ce que l'ouverture a
+   * consigne ? `null` si aucune ouverture ne porte les parties.
+   */
+  transactionMatchesLedger: boolean | null;
   /** Nombre de faits declare par la cloture, s'il y en a une. */
   declaredEventCount: number | null;
   eventCount: number;
@@ -92,6 +105,8 @@ export class EventChainVerificationService {
         transactionReference,
         verdict: closureExpected ? 'TAMPERED' : 'EMPTY',
         closed: false,
+        finalProofAnchored: false,
+        transactionMatchesLedger: null,
         declaredEventCount: null,
         eventCount: 0,
         anchoredCount: 0,
@@ -143,6 +158,11 @@ export class EventChainVerificationService {
     // les N derniers faits laisse une chaine 1..M coherente. La cloture declare
     // le total attendu, ce qui ferme cette derniere ouverture.
     const closing = chain.find((event) => event.eventType === TransactionEventType.CASE_CLOSED);
+    const closingResult =
+      closing === undefined
+        ? undefined
+        : results[chain.findIndex((event) => event.id === closing.id)];
+    const finalProofAnchored = closingResult?.anchorVerified === true;
     const declaredEventCount = closing?.closureEventCount ?? null;
     const closureExpected = this.isClosureExpected(transaction, chain);
 
@@ -178,6 +198,39 @@ export class EventChainVerificationService {
       );
     }
 
+    // --- Confrontation de la ligne courante au registre ----------------------
+    //
+    // Le registre remplace le scellement d'instantane. Verifier la seule chaine
+    // prouverait que les faits sont intacts, sans rien dire de la ligne
+    // `transactions` : un IBAN beneficiaire modifie apres coup passerait au
+    // travers. C'est ce controle qui rend le remplacement equivalent.
+    const opening = chain.find((event) => event.creditorIban !== null);
+    let transactionMatchesLedger: boolean | null = null;
+
+    if (opening && transaction) {
+      const divergences = (
+        [
+          ['IBAN du donneur d ordre', opening.debtorIban, transaction.debtorIban],
+          ['nom du donneur d ordre', opening.debtorName, transaction.debtorName],
+          ['IBAN du beneficiaire', opening.creditorIban, transaction.creditorIban],
+          ['nom du beneficiaire', opening.creditorName, transaction.creditorName],
+          ['libelle', opening.endToEndLabel, transaction.endToEndLabel],
+          ['montant', opening.expectedAmount.toFixed(2), Number(transaction.amount).toFixed(2)],
+          ['devise', opening.currency, transaction.currency],
+        ] as [string, string | null, string | null][]
+      ).filter(([, consigned, current]) => (consigned ?? null) !== (current ?? null));
+
+      transactionMatchesLedger = divergences.length === 0;
+
+      if (!transactionMatchesLedger) {
+        tampered = true;
+        findings.push(
+          'ALTERATION DETECTEE : la ligne ne correspond plus a ce que l ouverture a ' +
+            `consigne (${divergences.map(([champ]) => champ).join(', ')}).`,
+        );
+      }
+    }
+
     const head = chain[chain.length - 1].fingerprint;
 
     if (tampered) {
@@ -186,22 +239,18 @@ export class EventChainVerificationService {
       findings.push(
         'Chaine injoignable : contenu et ordre sont confirmes, la publication n a pas pu etre verifiee.',
       );
-    } else if (anchoredCount < chain.length) {
+    } else if (!finalProofAnchored) {
       findings.push(
-        `${anchoredCount} evenement(s) ancre(s) sur ${chain.length} : les plus recents ` +
-          'attendent le prochain lot.',
+        closing
+          ? 'La preuve finale attend le prochain lot d ancrage.'
+          : 'Dossier encore ouvert : aucun etat intermediaire n est ancre.',
       );
     } else {
       findings.push(
-        `Les ${chain.length} evenements sont intacts, ordonnes et ancres. ` +
-          `Sommet de chaine : ${head}.`,
+        `Les ${chain.length} evenements sont intacts et ordonnes. La cloture ancree ` +
+          `engage tout l historique ; sommet de chaine : ${head}.`,
       );
-      findings.push(
-        closing
-          ? 'Dossier clos : le total declare fait foi, aucune troncature possible.'
-          : 'Dossier encore ouvert : la troncature de queue reste indetectable ' +
-              'tant qu aucune preuve de synthese ne fixe le total.',
-      );
+      findings.push('Dossier clos : le total declare fait foi, aucune troncature possible.');
     }
 
     return {
@@ -210,10 +259,12 @@ export class EventChainVerificationService {
         ? 'TAMPERED'
         : chainUnavailable
           ? 'CHAIN_UNAVAILABLE'
-          : anchoredCount < chain.length
+          : !finalProofAnchored
             ? 'PARTIALLY_ANCHORED'
             : 'VERIFIED',
       closed: closing !== undefined,
+      finalProofAnchored,
+      transactionMatchesLedger,
       declaredEventCount,
       eventCount: chain.length,
       anchoredCount,
@@ -237,10 +288,18 @@ export class EventChainVerificationService {
     chain: readonly TransactionEvent[],
   ): boolean {
     return (
+      (transaction?.paymentChannel === PaymentChannel.LEGACY_TRANSFER &&
+        (transaction.status === TransactionStatus.COMPLETED ||
+          transaction.status === TransactionStatus.FAILED)) ||
+      (transaction?.providerStatus === ProviderStatus.FAILED &&
+        transaction.reconciliationStatus === ReconciliationStatus.NOT_APPLICABLE) ||
       transaction?.reconciliationStatus === ReconciliationStatus.MATCHED ||
       transaction?.refundStatus === RefundStatus.COMPLETED ||
       chain.some(
         (event) =>
+          event.eventType === TransactionEventType.TRANSFER_COMPLETED ||
+          event.eventType === TransactionEventType.TRANSFER_FAILED ||
+          event.eventType === TransactionEventType.PROVIDER_FAILED ||
           event.eventType === TransactionEventType.RECONCILIATION_MATCHED ||
           event.eventType === TransactionEventType.REFUND_COMPLETED,
       )

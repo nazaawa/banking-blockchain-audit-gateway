@@ -56,7 +56,7 @@ export class AnchorsController {
   @ApiOperation({
     summary: 'Declencher un ancrage immediat',
     description:
-      'Constitue un lot avec les transactions scellees en attente et publie sa racine sans ' +
+      'Constitue un lot avec les preuves finales de dossier en attente et publie sa racine sans ' +
       'attendre la prochaine echeance du planificateur. Destine a l exploitation et a la ' +
       'demonstration ; le fonctionnement nominal reste periodique.',
   })
@@ -75,8 +75,8 @@ export class AnchorsController {
 
   @Get('statistics')
   @RequireScopes(SCOPES.anchorsRead)
-  @ApiOperation({ summary: 'Repartition des transactions par etat d ancrage' })
-  @ApiOkResponse({ description: 'Nombre de transactions par statut' })
+  @ApiOperation({ summary: 'Repartition des dossiers par etat de leur preuve finale' })
+  @ApiOkResponse({ description: 'Nombre de dossiers par statut' })
   async statistics(): Promise<Record<string, number>> {
     return this.anchorService.getStatistics();
   }
