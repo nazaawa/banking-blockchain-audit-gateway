@@ -1,13 +1,15 @@
 services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — transactions, piste d'audit, lots d'ancrage
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
-    container_name: banking-soap-postgres
+    container_name: banking-gateway-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DB_USERNAME:-banking}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-banking}
       POSTGRES_DB: ${DB_NAME:-banking_soap}
-      # Accelere l'initialisation ; la base reste locale au conteneur.
       POSTGRES_INITDB_ARGS: '--encoding=UTF8'
     ports:
       - '${DB_PORT:-5432}:5432'
@@ -15,7 +17,6 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      # L'API ne demarre qu'une fois la base reellement prete a accepter des requetes.
       test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME:-banking} -d ${DB_NAME:-banking_soap}']
       interval: 5s
       timeout: 5s
@@ -24,16 +25,78 @@ services:
     networks:
       - banking-net
 
+  # ---------------------------------------------------------------------------
+  # Chaine EVM locale — registre d'audit
+  #
+  # Anvil (Foundry) : noeud jetable, instantane, sans frais. La cle privee du
+  # compte #0 est publique et connue de tous : elle n'a de valeur que sur cette
+  # chaine locale.
+  # ---------------------------------------------------------------------------
+  chain:
+    image: ghcr.io/foundry-rs/foundry:latest
+    container_name: banking-gateway-chain
+    restart: unless-stopped
+    entrypoint: ['anvil']
+    command:
+      - '--host'
+      - '0.0.0.0'
+      - '--port'
+      - '8545'
+      - '--chain-id'
+      - '${BLOCKCHAIN_CHAIN_ID:-31337}'
+      # Bloc a chaque transaction : l'ancrage est confirme immediatement.
+      - '--block-time'
+      - '1'
+    ports:
+      - '8545:8545'
+    healthcheck:
+      test: ['CMD', 'cast', 'block-number', '--rpc-url', 'http://localhost:8545']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - banking-net
+
+  # ---------------------------------------------------------------------------
+  # Deploiement du contrat AuditAnchor — execution unique
+  #
+  # Anvil etant deterministe, le compte #0 deployant sa premiere transaction
+  # obtient toujours l'adresse 0x5FbDB2315678afecb367f032d93F642f64180aa3.
+  # L'API peut donc la connaitre a l'avance.
+  # ---------------------------------------------------------------------------
+  contract-deployer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: banking-gateway-deployer
+    depends_on:
+      chain:
+        condition: service_healthy
+    environment:
+      BLOCKCHAIN_RPC_URL: http://chain:8545
+      BLOCKCHAIN_PRIVATE_KEY: ${BLOCKCHAIN_PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}
+    entrypoint: ['node', 'scripts/deploy-contract.js']
+    restart: 'no'
+    networks:
+      - banking-net
+
+  # ---------------------------------------------------------------------------
+  # Passerelle
+  # ---------------------------------------------------------------------------
   api:
     build:
       context: .
       dockerfile: Dockerfile
       target: runtime
-    container_name: banking-soap-api
+    container_name: banking-gateway-api
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+      contract-deployer:
+        condition: service_completed_successfully
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 3000
@@ -41,7 +104,6 @@ services:
       SWAGGER_ENABLED: ${SWAGGER_ENABLED:-true}
       SWAGGER_PATH: ${SWAGGER_PATH:-api/docs}
 
-      # `postgres` est le nom du service : la resolution DNS est assuree par le reseau Compose.
       DB_HOST: postgres
       DB_PORT: 5432
       DB_USERNAME: ${DB_USERNAME:-banking}
@@ -58,6 +120,17 @@ services:
       SOAP_MAX_RETRIES: ${SOAP_MAX_RETRIES:-2}
       SOAP_RETRY_DELAY_MS: ${SOAP_RETRY_DELAY_MS:-300}
       SOAP_MAX_RESPONSE_BYTES: ${SOAP_MAX_RESPONSE_BYTES:-1048576}
+
+      BLOCKCHAIN_ENABLED: ${BLOCKCHAIN_ENABLED:-true}
+      BLOCKCHAIN_RPC_URL: http://chain:8545
+      BLOCKCHAIN_CHAIN_ID: ${BLOCKCHAIN_CHAIN_ID:-31337}
+      BLOCKCHAIN_CONTRACT_ADDRESS: ${BLOCKCHAIN_CONTRACT_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}
+      BLOCKCHAIN_PRIVATE_KEY: ${BLOCKCHAIN_PRIVATE_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}
+      BLOCKCHAIN_CONFIRMATIONS: ${BLOCKCHAIN_CONFIRMATIONS:-1}
+
+      ANCHOR_BATCH_MAX_SIZE: ${ANCHOR_BATCH_MAX_SIZE:-50}
+      ANCHOR_INTERVAL_MS: ${ANCHOR_INTERVAL_MS:-15000}
+      ANCHOR_MAX_RETRIES: ${ANCHOR_MAX_RETRIES:-3}
 
       ALLOWED_CURRENCIES: ${ALLOWED_CURRENCIES:-EUR,USD,GBP,CHF,XOF,XAF,CDF}
       TRANSFER_MAX_AMOUNT: ${TRANSFER_MAX_AMOUNT:-999999999.99}

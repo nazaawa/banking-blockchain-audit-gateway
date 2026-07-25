@@ -52,6 +52,14 @@ COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json ./
 
+# Les XSD sont lus a l'execution par XsdValidatorService : ils vivent a la
+# racine, hors de `src/`, et ne sont donc pas emportes par `nest build`.
+COPY --chown=node:node schemas ./schemas
+
+# Scripts de deploiement du contrat : utilises par le service `contract-deployer`
+# de docker-compose, qui partage cette meme image.
+COPY --chown=node:node scripts ./scripts
+
 # Ne jamais executer l'API en root.
 USER node
 
