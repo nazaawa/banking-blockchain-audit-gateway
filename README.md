@@ -958,6 +958,45 @@ Couverture notable :
   clôture conditionnée à l'extinction de la dette ;
 - **Résilience** — chaîne injoignable distinguée d'une altération, remise en file après échec.
 
+### Intégration continue
+
+`.github/workflows/ci.yml` s'exécute à **chaque poussée, sur toutes les branches**, et sur chaque
+_pull request_. Quatre travaux en parallèle :
+
+| Travail      | Ce qu'il vérifie                                                            |
+| ------------ | --------------------------------------------------------------------------- |
+| `static`     | Lint sans avertissement toléré, types, build, formatage                     |
+| `unit`       | 252 tests unitaires — aucune dépendance                                     |
+| `e2e`        | 147 tests d'intégration sur un PostgreSQL 16 réel                           |
+| `migrations` | Rejeu intégral depuis une base vierge, **dérive de schéma**, retour arrière |
+
+**Aucun secret n'est requis.** Le client SOAP et la chaîne sont bouchonnés dans les suites : la
+vérification est entièrement hors ligne et déterministe. Rien à configurer sur le dépôt pour qu'elle
+tourne.
+
+#### Pourquoi les migrations ont leur propre travail
+
+Les tests passent sur un schéma construit par `synchronize`. Rien ne garantit pour autant que les
+**migrations** produisent le même schéma — et cet écart a introduit de vraies régressions ici :
+contraintes absentes, clé étrangère recréée à chaque démarrage, déclencheur d'immuabilité manquant.
+
+Le contrôle de dérive compare les deux : toute sortie de `schema:log` autre que « up to date » fait
+échouer la construction. C'est le garde-fou qui manquait le plus.
+
+#### Reproduire la CI localement
+
+```bash
+npm run verify
+```
+
+Enchaîne exactement les mêmes contrôles que le travail `static` et les deux suites de tests.
+Découvrir un échec avant de pousser coûte moins cher que de l'apprendre après.
+
+Le travail `migrations` n'en fait pas partie : il exige une base vierge, que le script ne doit pas
+créer ni détruire sur un poste de développement.
+
+---
+
 ### Défauts réels trouvés pendant le développement
 
 1. `<soap:Fault/>` vide non reconnu comme faute (xml2js le rend en chaîne vide) ;
