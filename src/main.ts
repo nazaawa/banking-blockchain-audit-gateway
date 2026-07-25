@@ -68,6 +68,9 @@ async function bootstrap(): Promise<void> {
         )
         .setVersion('1.0')
         .addTag('transfers', 'Initiation et consultation des virements')
+        .addTag('mobile-money', 'Collecte Mobile Money, traitement bancaire et rapprochement')
+        .addTag('mobile-money-webhooks', 'Callbacks signes de l agregateur')
+        .addTag('mobile-money-simulator', 'Simulation locale de l agregateur')
         .addTag('health', 'Supervision')
         .addGlobalParameters({
           name: CORRELATION_ID_HEADER,

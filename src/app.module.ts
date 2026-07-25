@@ -13,6 +13,7 @@ import { SoapModule } from './soap/soap.module';
 import { XmlModule } from './xml/xml.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { TransactionsModule } from './transactions/transactions.module';
+import { MobileMoneyModule } from './mobile-money/mobile-money.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { TransactionsModule } from './transactions/transactions.module';
     BlockchainModule,
     AuditModule,
     TransactionsModule,
+    MobileMoneyModule,
     HealthModule,
   ],
   providers: [
