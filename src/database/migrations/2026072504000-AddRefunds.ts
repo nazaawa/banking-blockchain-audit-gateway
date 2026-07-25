@@ -38,7 +38,9 @@ export class AddRefunds2026072504000 implements MigrationInterface {
         "updated_at" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
         CONSTRAINT "PK_refunds" PRIMARY KEY ("id"),
         CONSTRAINT "UQ_refunds_provider_idempotency_key" UNIQUE ("provider_idempotency_key"),
-        CONSTRAINT "FK_refunds_transaction_reference" FOREIGN KEY ("transaction_reference")
+        -- Nom genere par TypeORM pour cette relation. Le conserver evite que
+        -- \`synchronize\` ne supprime puis recree la contrainte a chaque demarrage.
+        CONSTRAINT "FK_3f15b380c76f06414528b35604f" FOREIGN KEY ("transaction_reference")
           REFERENCES "transactions"("reference") ON DELETE RESTRICT
       )`,
     );
