@@ -211,9 +211,14 @@ describe('Remboursement (e2e)', () => {
 
       expect(reopened.body.status).toBe(RefundStatus.FAILED);
       expect(reopened.body.lastError).toBeUndefined();
-      expect((await eventsOf(reference)).map((event) => event.eventType)).toContain(
-        'REFUND_REOPENED',
+      const reopenedEvent = (await eventsOf(reference)).find(
+        (event) => event.eventType === 'REFUND_REOPENED',
       );
+      expect(reopenedEvent).toMatchObject({
+        actorId: 'controle',
+        actorRole: 'REFUND_APPROVER',
+        actionOrigin: 'API',
+      });
 
       const duplicate = await request(app.getHttpServer())
         .post(`/api/v1/transfers/${reference}/refund/reopen`)
@@ -327,10 +332,16 @@ describe('Remboursement (e2e)', () => {
       const { reference } = await withDebt();
       await requestRefund(reference).expect(200);
 
-      const types = (await eventsOf(reference)).map((e) => e.eventType);
+      const events = await eventsOf(reference);
+      const types = events.map((e) => e.eventType);
 
       expect(types).toEqual(expect.arrayContaining(['REFUND_REQUESTED', 'REFUND_COMPLETED']));
       expect(types.indexOf('REFUND_REQUESTED')).toBeLessThan(types.indexOf('REFUND_COMPLETED'));
+      expect(events.find((event) => event.eventType === 'REFUND_REQUESTED')).toMatchObject({
+        actorId: 'e2e',
+        actorRole: 'REFUND_OPERATOR',
+        actionOrigin: 'API',
+      });
     });
 
     it('scelle REFUND_FAILED sur un refus', async () => {

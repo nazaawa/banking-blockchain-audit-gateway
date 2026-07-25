@@ -5,8 +5,14 @@ import { CaseStatus, RefundStatus } from '../mobile-money/enums/mobile-money.enu
 import type { Transaction } from '../transactions/entities/transaction.entity';
 import { RefundResponseDto } from './dto/refund-response.dto';
 import { Refund } from './entities/refund.entity';
-import { ProviderRefundRejectedException, type ProviderRefundPort } from './provider-refund.port';
+import {
+  ProviderRefundRejectedException,
+  ProviderRefundUnavailableException,
+  type ProviderRefundPort,
+} from './provider-refund.port';
 import { TransactionStateMachine } from '../transactions/state/transaction-state.machine';
+import type { MetricsService } from '../observability/metrics.service';
+import { EventActionOrigin, EventActorRole } from '../events/enums/event-actor.enum';
 import { RefundsService } from './refunds.service';
 
 describe('RefundsService', () => {
@@ -95,6 +101,9 @@ describe('RefundsService', () => {
       transactions,
       events,
       new TransactionStateMachine(),
+      // Les compteurs sont observes ailleurs : ici seule la mecanique de
+      // remboursement est eprouvee.
+      { refundsFailed: { inc: jest.fn() } } as unknown as MetricsService,
       provider,
       dataSource,
     );
@@ -167,12 +176,38 @@ describe('RefundsService', () => {
     expect(events.record).toHaveBeenCalledWith(
       expect.objectContaining({
         type: TransactionEventType.REFUND_REOPENED,
-        detail: expect.stringContaining('superviseur'),
+        actorId: 'superviseur',
+        actorRole: EventActorRole.REFUND_APPROVER,
+        actionOrigin: EventActionOrigin.API,
       }),
       expect.anything(),
     );
     expect(completed.status).toBe(RefundStatus.COMPLETED);
     expect(provider.refund).toHaveBeenCalledTimes(2);
+  });
+
+  it('compare la reouverture au dernier operateur apres une reprise manuelle', async () => {
+    provider.refund
+      .mockRejectedValueOnce(new ProviderRefundUnavailableException('Fournisseur indisponible'))
+      .mockRejectedValueOnce(new ProviderRefundRejectedException('Solde marchand insuffisant'));
+
+    const temporaryFailure = await service.requestRefund(transaction.reference, 'acteur-a');
+    expect(temporaryFailure.retryable).toBe(true);
+
+    const businessRejection = await service.requestRefund(transaction.reference, 'acteur-b');
+    expect(businessRejection.retryable).toBe(false);
+    expect(businessRejection.createdBy).toBe('acteur-a');
+    expect(businessRejection.lastRequestedBy).toBe('acteur-b');
+
+    await expect(service.reopenRefund(transaction.reference, 'acteur-b')).rejects.toMatchObject({
+      response: expect.objectContaining({ error: 'SEGREGATION_OF_DUTIES' }),
+    });
+
+    const requestEvents = events.record.mock.calls
+      .map(([input]) => input)
+      .filter((input) => input.type === TransactionEventType.REFUND_REQUESTED);
+    expect(requestEvents).toHaveLength(2);
+    expect(requestEvents.map((event) => event.actorId)).toEqual(['acteur-a', 'acteur-b']);
   });
 
   it('refuse de rouvrir un dossier deja rejouable', async () => {

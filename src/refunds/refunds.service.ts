@@ -12,10 +12,12 @@ import { randomBytes } from 'node:crypto';
 import { DataSource, EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { getCorrelationId } from '../common/context/request-context';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
+import { EventActionOrigin, EventActorRole } from '../events/enums/event-actor.enum';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { amountsMatch, currenciesMatch } from '../mobile-money/amount.util';
 import { CaseStatus, RefundStatus } from '../mobile-money/enums/mobile-money.enum';
 import { Transaction } from '../transactions/entities/transaction.entity';
+import { MetricsService } from '../observability/metrics.service';
 import { stateOf, TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import { Refund } from './entities/refund.entity';
 import {
@@ -33,6 +35,14 @@ const ATTEMPTABLE: ReadonlySet<RefundStatus> = new Set([
   RefundStatus.REQUESTED,
   RefundStatus.FAILED,
 ]);
+
+interface AttemptActor {
+  actorId: string;
+  actorRole: EventActorRole;
+  actionOrigin: EventActionOrigin;
+  /** Seuls les appels humains modifient la separation des taches. */
+  manual: boolean;
+}
 
 /**
  * Remboursement du payeur.
@@ -67,6 +77,7 @@ export class RefundsService {
     private readonly transactions: Repository<Transaction>,
     private readonly events: TransactionEventsService,
     private readonly stateMachine: TransactionStateMachine,
+    private readonly metrics: MetricsService,
     @Inject(PROVIDER_REFUND_PORT)
     private readonly provider: ProviderRefundPort,
     @InjectDataSource()
@@ -96,7 +107,18 @@ export class RefundsService {
       return refund;
     }
 
-    return this.attempt(refund, transaction);
+    return this.attempt(
+      refund,
+      transaction,
+      requestedBy
+        ? {
+            actorId: requestedBy,
+            actorRole: EventActorRole.REFUND_OPERATOR,
+            actionOrigin: EventActionOrigin.API,
+            manual: true,
+          }
+        : undefined,
+    );
   }
 
   /**
@@ -142,7 +164,7 @@ export class RefundsService {
       // les deux reviendrait a lui permettre de forcer indefiniment un
       // remboursement que le fournisseur refuse — sans qu'aucun tiers ne
       // l'examine. Le registre garde trace des deux acteurs.
-      if (reopenedBy && refund.requestedBy && refund.requestedBy === reopenedBy) {
+      if (reopenedBy && refund.lastRequestedBy && refund.lastRequestedBy === reopenedBy) {
         throw new ForbiddenException({
           error: 'SEGREGATION_OF_DUTIES',
           message:
@@ -157,6 +179,7 @@ export class RefundsService {
 
       refund.retryable = true;
       refund.lastError = null;
+      refund.lastApprovedBy = reopenedBy ?? null;
 
       await this.events.record(
         {
@@ -164,7 +187,10 @@ export class RefundsService {
           transaction,
           observedAmount: refund.amount,
           observedCurrency: refund.currency,
-          detail: `Dossier rouvert${reopenedBy ? ` par ${reopenedBy}` : ''} apres levee du refus fournisseur`,
+          detail: 'Dossier rouvert apres levee du refus fournisseur',
+          actorId: reopenedBy ?? null,
+          actorRole: reopenedBy ? EventActorRole.REFUND_APPROVER : null,
+          actionOrigin: reopenedBy ? EventActionOrigin.API : null,
         },
         manager,
       );
@@ -213,7 +239,12 @@ export class RefundsService {
       });
       if (!transaction) continue;
 
-      const result = await this.attempt(refund, transaction);
+      const result = await this.attempt(refund, transaction, {
+        actorId: 'refund-retry-worker',
+        actorRole: EventActorRole.SYSTEM,
+        actionOrigin: EventActionOrigin.RETRY_WORKER,
+        manual: false,
+      });
       if (result.status === RefundStatus.COMPLETED) completed += 1;
     }
 
@@ -268,7 +299,9 @@ export class RefundsService {
       providerIdempotencyKey: `RFD-${randomBytes(16).toString('hex')}`,
       attempts: 0,
       retryable: true,
-      requestedBy: requestedBy ?? null,
+      createdBy: requestedBy ?? null,
+      lastRequestedBy: null,
+      lastApprovedBy: null,
       correlationId: transaction.correlationId || getCorrelationId(),
     });
 
@@ -292,7 +325,11 @@ export class RefundsService {
   }
 
   /** Une tentative aupres du fournisseur, avec consignation du fait obtenu. */
-  private async attempt(refund: Refund, transaction: Transaction): Promise<Refund> {
+  private async attempt(
+    refund: Refund,
+    transaction: Transaction,
+    actor?: AttemptActor,
+  ): Promise<Refund> {
     if (
       !ATTEMPTABLE.has(refund.status) ||
       (refund.status === RefundStatus.FAILED && !refund.retryable)
@@ -300,29 +337,32 @@ export class RefundsService {
       return refund;
     }
 
-    const firstAttempt = refund.attempts === 0;
     refund.status = RefundStatus.REQUESTED;
     refund.attempts += 1;
     refund.requestedAt ??= new Date();
+    if (actor?.manual) refund.lastRequestedBy = actor.actorId;
 
     // La transaction SQL se referme avant la sollicitation du fournisseur : un
     // appel reseau ne doit jamais maintenir des lignes verrouillees.
     const inFlight = await this.dataSource.transaction(async (manager) => {
       const persisted = await manager.getRepository(Refund).save(refund);
 
-      if (firstAttempt) {
-        await this.syncTransaction(transaction, RefundStatus.REQUESTED, undefined, manager);
-        await this.events.record(
-          {
-            type: TransactionEventType.REFUND_REQUESTED,
-            transaction,
-            observedAmount: persisted.amount,
-            observedCurrency: persisted.currency,
-            detail: `Remboursement de ${persisted.amount.toFixed(2)} ${persisted.currency} demande`,
-          },
-          manager,
-        );
-      }
+      await this.syncTransaction(transaction, RefundStatus.REQUESTED, undefined, manager);
+      await this.events.record(
+        {
+          type: TransactionEventType.REFUND_REQUESTED,
+          transaction,
+          observedAmount: persisted.amount,
+          observedCurrency: persisted.currency,
+          detail:
+            `Tentative ${persisted.attempts} de remboursement de ` +
+            `${persisted.amount.toFixed(2)} ${persisted.currency}`,
+          actorId: actor?.actorId ?? null,
+          actorRole: actor?.actorRole ?? null,
+          actionOrigin: actor?.actionOrigin ?? null,
+        },
+        manager,
+      );
 
       return persisted;
     });
@@ -340,9 +380,10 @@ export class RefundsService {
         transaction,
         result.providerRefundReference,
         result.deduplicated,
+        actor,
       );
     } catch (error) {
-      return this.recordFailure(inFlight, transaction, error);
+      return this.recordFailure(inFlight, transaction, error, actor);
     }
   }
 
@@ -351,6 +392,7 @@ export class RefundsService {
     transaction: Transaction,
     providerRefundReference: string,
     deduplicated: boolean,
+    actor?: AttemptActor,
   ): Promise<Refund> {
     refund.status = RefundStatus.COMPLETED;
     refund.providerRefundReference = providerRefundReference;
@@ -380,6 +422,9 @@ export class RefundsService {
           detail:
             `Remboursement confirme (${providerRefundReference})` +
             (deduplicated ? ' — reprise d une demande anterieure' : ''),
+          actorId: actor?.actorId ?? null,
+          actorRole: actor?.actorRole ?? null,
+          actionOrigin: actor?.actionOrigin ?? null,
         },
         manager,
       );
@@ -407,6 +452,7 @@ export class RefundsService {
     refund: Refund,
     transaction: Transaction,
     error: unknown,
+    actor?: AttemptActor,
   ): Promise<Refund> {
     const rejected = error instanceof ProviderRefundRejectedException;
     const reason =
@@ -438,12 +484,19 @@ export class RefundsService {
           observedAmount: persisted.amount,
           observedCurrency: persisted.currency,
           detail: `Tentative ${persisted.attempts} en echec : ${reason}`,
+          actorId: actor?.actorId ?? null,
+          actorRole: actor?.actorRole ?? null,
+          actionOrigin: actor?.actionOrigin ?? null,
         },
         manager,
       );
 
       return persisted;
     });
+
+    // Un refus metier ne se resorbe pas tout seul : c'est le signal qui doit
+    // reveiller un exploitant, pas la ligne de journal qu'il faudrait relire.
+    this.metrics.refundsFailed.inc({ retryable: String(!rejected) });
 
     this.logger.error({
       event: 'refund.failed',

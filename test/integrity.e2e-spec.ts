@@ -169,7 +169,7 @@ describe('Integrite des donnees de paiement (e2e)', () => {
       );
 
       expect(opening.event_type).toBe('TRANSFER_INITIATED');
-      expect(opening.record_format_version).toBe('2.0');
+      expect(opening.record_format_version).toBe('2.1');
       expect(Number(opening.encryption_version)).toBe(1);
 
       // Lecture SQL brute : la base ne contient que du chiffre. C'est la seule

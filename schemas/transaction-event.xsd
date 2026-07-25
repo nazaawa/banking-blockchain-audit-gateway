@@ -127,6 +127,37 @@
     </xs:sequence>
   </xs:complexType>
 
+  <xs:complexType name="ActorType">
+    <xs:sequence>
+      <xs:element name="actorId">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:minLength value="1"/>
+            <xs:maxLength value="128"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="actorRole">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="REFUND_OPERATOR"/>
+            <xs:enumeration value="REFUND_APPROVER"/>
+            <xs:enumeration value="SYSTEM"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="actionOrigin">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="API"/>
+            <xs:enumeration value="RETRY_WORKER"/>
+            <xs:enumeration value="SYSTEM"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
   <xs:complexType name="PartiesType">
     <xs:annotation>
       <xs:documentation>
@@ -163,6 +194,7 @@
       <xs:element name="occurredAt" type="xs:dateTime"/>
       <xs:element name="correlationId" type="xs:string"/>
       <xs:element name="detail" type="xs:string" minOccurs="0"/>
+      <xs:element name="actor" type="tns:ActorType" minOccurs="0"/>
       <!--
         Absent sur le premier evenement d'une transaction : c'est ce qui
         distingue une chaine tronquee en tete d'une chaine complete.

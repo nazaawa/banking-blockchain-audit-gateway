@@ -102,9 +102,17 @@ export class Refund {
   @Column({ name: 'completed_at', type: 'timestamptz', nullable: true })
   completedAt!: Date | null;
 
-  @ApiProperty({ description: 'Identite de la cle d API ayant demande le remboursement' })
-  @Column({ name: 'requested_by', type: 'varchar', length: 128, nullable: true })
-  requestedBy!: string | null;
+  @ApiProperty({ description: 'Acteur ayant cree le dossier' })
+  @Column({ name: 'created_by', type: 'varchar', length: 128, nullable: true })
+  createdBy!: string | null;
+
+  @ApiPropertyOptional({ description: 'Dernier acteur ayant declenche une tentative manuelle' })
+  @Column({ name: 'last_requested_by', type: 'varchar', length: 128, nullable: true })
+  lastRequestedBy!: string | null;
+
+  @ApiPropertyOptional({ description: 'Dernier acteur ayant approuve une reouverture' })
+  @Column({ name: 'last_approved_by', type: 'varchar', length: 128, nullable: true })
+  lastApprovedBy!: string | null;
 
   @ApiProperty()
   @Column({ name: 'correlation_id', type: 'varchar', length: 128 })

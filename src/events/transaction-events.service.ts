@@ -10,6 +10,7 @@ import { LedgerPostingService } from '../accounting/ledger-posting.service';
 import type { Transaction } from '../transactions/entities/transaction.entity';
 import { TransactionEvent } from './entities/transaction-event.entity';
 import { TransactionEventType } from './enums/transaction-event.enum';
+import { EventActionOrigin, EventActorRole } from './enums/event-actor.enum';
 import {
   EVENT_RECORD_FORMAT_VERSION,
   TransactionEventXmlBuilder,
@@ -52,6 +53,9 @@ export interface RecordEventInput {
   observedCurrency?: string | null;
   detail?: string | null;
   occurredAt?: Date;
+  actorId?: string | null;
+  actorRole?: EventActorRole | null;
+  actionOrigin?: EventActionOrigin | null;
 }
 
 /**
@@ -125,6 +129,9 @@ export class TransactionEventsService {
         occurredAt: input.occurredAt ?? new Date(),
         correlationId: transaction.correlationId || getCorrelationId(),
         detail: input.detail ?? null,
+        actorId: input.actorId ?? null,
+        actorRole: input.actorRole ?? null,
+        actionOrigin: input.actionOrigin ?? null,
         previousFingerprint: previous?.fingerprint ?? null,
         // Derives du sommet reel lu pour cette tentative. Si une insertion
         // concurrente prend le rang, la tentative suivante recalcule les deux

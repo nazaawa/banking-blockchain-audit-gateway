@@ -22,6 +22,7 @@ import {
   RefundStatus,
 } from '../../mobile-money/enums/mobile-money.enum';
 import { TransactionEventType } from '../enums/transaction-event.enum';
+import { EventActionOrigin, EventActorRole } from '../enums/event-actor.enum';
 
 const numericTransformer = {
   to: (value: number | null): number | null => value,
@@ -79,6 +80,10 @@ const numericTransformer = {
   `"creditor_name" IS NULL OR "creditor_name" ~ '^enc\\.v1\\.[A-Za-z0-9_-]{1,32}\\.[A-Za-z0-9_-]+$'`,
 )
 @Check('CHK_transaction_events_encryption_version', `"encryption_version" = 1`)
+@Check(
+  'CHK_transaction_events_actor_context',
+  `("actor_id" IS NULL AND "actor_role" IS NULL AND "action_origin" IS NULL) OR ("actor_id" IS NOT NULL AND "actor_role" IS NOT NULL AND "action_origin" IS NOT NULL)`,
+)
 @Entity('transaction_events')
 @Unique('uq_transaction_events_sequence', ['transactionReference', 'sequence'])
 @Index('idx_transaction_events_reference', ['transactionReference'])
@@ -204,6 +209,18 @@ export class TransactionEvent {
   @ApiPropertyOptional({ description: 'Motif lisible du fait consigne' })
   @Column({ type: 'varchar', length: 1024, nullable: true })
   detail!: string | null;
+
+  @ApiPropertyOptional({ description: 'Identifiant stable de l acteur ayant declenche le fait' })
+  @Column({ name: 'actor_id', type: 'varchar', length: 128, nullable: true })
+  actorId!: string | null;
+
+  @ApiPropertyOptional({ enum: EventActorRole })
+  @Column({ name: 'actor_role', type: 'varchar', length: 32, nullable: true })
+  actorRole!: EventActorRole | null;
+
+  @ApiPropertyOptional({ enum: EventActionOrigin })
+  @Column({ name: 'action_origin', type: 'varchar', length: 32, nullable: true })
+  actionOrigin!: EventActionOrigin | null;
 
   // --- Chainage et preuve -----------------------------------------------------
 

@@ -10,7 +10,7 @@ export const EVENT_NAMESPACE = 'urn:banking:event:1.0';
  * evolueront a des rythmes differents, et melanger leurs versions rendrait la
  * verification d'archives ambigue.
  */
-export const EVENT_RECORD_FORMAT_VERSION = '2.0';
+export const EVENT_RECORD_FORMAT_VERSION = '2.1';
 
 const INDENT = '  ';
 
@@ -79,6 +79,15 @@ export class TransactionEventXmlBuilder {
       this.element('occurredAt', this.formatDate(event.occurredAt), 1),
       this.element('correlationId', event.correlationId, 1),
       this.optionalElement('detail', event.detail, 1),
+      ...(event.actorId && event.actorRole && event.actionOrigin
+        ? [
+            `${INDENT}<actor>`,
+            this.element('actorId', event.actorId, 2),
+            this.element('actorRole', event.actorRole, 2),
+            this.element('actionOrigin', event.actionOrigin, 2),
+            `${INDENT}</actor>`,
+          ]
+        : []),
       this.optionalElement('previousFingerprint', event.previousFingerprint, 1),
 
       // Bloc present sur le seul evenement de cloture. Les autres documents

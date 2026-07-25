@@ -43,7 +43,13 @@ export class RefundResponseDto {
   completedAt?: Date;
 
   @ApiPropertyOptional()
-  requestedBy?: string;
+  createdBy?: string;
+
+  @ApiPropertyOptional()
+  lastRequestedBy?: string;
+
+  @ApiPropertyOptional()
+  lastApprovedBy?: string;
 
   @ApiProperty()
   correlationId!: string;
@@ -67,7 +73,9 @@ export class RefundResponseDto {
     dto.lastError = refund.lastError ?? undefined;
     dto.requestedAt = refund.requestedAt ?? undefined;
     dto.completedAt = refund.completedAt ?? undefined;
-    dto.requestedBy = refund.requestedBy ?? undefined;
+    dto.createdBy = refund.createdBy ?? undefined;
+    dto.lastRequestedBy = refund.lastRequestedBy ?? undefined;
+    dto.lastApprovedBy = refund.lastApprovedBy ?? undefined;
     dto.correlationId = refund.correlationId;
     dto.createdAt = refund.createdAt;
     dto.updatedAt = refund.updatedAt;
