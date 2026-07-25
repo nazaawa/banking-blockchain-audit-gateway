@@ -67,6 +67,15 @@ async function bootstrap(): Promise<void> {
           ].join('\n'),
         )
         .setVersion('1.0')
+        .addBearerAuth(
+          {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: '<keyId>.<secret>',
+            description: 'Cle generee avec `npm run auth:keygen -- <keyId> <scope1,scope2>`',
+          },
+          'api-key',
+        )
         .addTag('transfers', 'Initiation et consultation des virements')
         .addTag('mobile-money', 'Collecte Mobile Money, traitement bancaire et rapprochement')
         .addTag('mobile-money-webhooks', 'Callbacks signes de l agregateur')

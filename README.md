@@ -55,19 +55,19 @@ Deux principes structurants :
 
 ## Stack
 
-| Besoin | Choix |
-| --- | --- |
-| API | NestJS 11 (Express 5) |
-| Base de données | PostgreSQL 16 |
-| ORM | TypeORM 0.3 (repository dédié, verrouillage optimiste) |
-| Client SOAP | `soap` (node-soap) sur WSDL embarqué |
-| Analyse XML | `xml2js` avec gardes anti-XXE |
-| Validation XSD | `xmllint-wasm` — libxml2 en WebAssembly |
-| Blockchain | Chaîne EVM locale (Anvil / nœud Hardhat) + contrat Solidity |
-| Client chaîne | `ethers` v6 |
-| Documentation | Swagger / OpenAPI 3 |
-| Tests | Jest + Supertest — **240 tests** |
-| Conteneurisation | Docker multi-stage + Docker Compose |
+| Besoin           | Choix                                                       |
+| ---------------- | ----------------------------------------------------------- |
+| API              | NestJS 11 (Express 5)                                       |
+| Base de données  | PostgreSQL 16                                               |
+| ORM              | TypeORM 0.3 (repository dédié, verrouillage optimiste)      |
+| Client SOAP      | `soap` (node-soap) sur WSDL embarqué                        |
+| Analyse XML      | `xml2js` avec gardes anti-XXE                               |
+| Validation XSD   | `xmllint-wasm` — libxml2 en WebAssembly                     |
+| Blockchain       | Chaîne EVM locale (Anvil / nœud Hardhat) + contrat Solidity |
+| Client chaîne    | `ethers` v6                                                 |
+| Documentation    | Swagger / OpenAPI 3                                         |
+| Tests            | Jest + Supertest — **240 tests**                            |
+| Conteneurisation | Docker multi-stage + Docker Compose                         |
 
 `xmllint-wasm` a été retenu plutôt que `libxmljs` (compilation native) ou `xsd-schema-validator`
 (dépendance à une JVM) : c'est le même moteur que l'outil `xmllint` de référence, sans rien à
@@ -81,6 +81,10 @@ compiler, identique du poste de développement à l'image Alpine.
 
 ```bash
 cp .env.example .env
+
+# Génère le secret à transmettre à l'appelant et l'empreinte à placer dans API_KEYS
+npm run auth:keygen -- local transfers:read,transfers:write,reconciliation:write,simulator:write
+
 docker compose up --build
 ```
 
@@ -103,6 +107,9 @@ psql -d banking_soap_test -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
 npm install
 cp .env.example .env
 
+# Reporter l'entrée générée dans API_KEYS et conserver le secret affiché
+npm run auth:keygen -- local transfers:read,transfers:write,reconciliation:write,simulator:write
+
 # 1. Chaîne EVM locale
 npm run chain:node
 
@@ -121,6 +128,22 @@ npm run start:dev
 Pour travailler sans chaîne, `BLOCKCHAIN_ENABLED=false` : les transactions restent scellées
 (empreinte calculée, altération détectable localement) mais ne sont jamais publiées.
 
+### Authentification
+
+Toutes les routes métier refusent par défaut les appels sans clé d'API. Seules la sonde de santé
+et le webhook Mobile Money sont publics ; ce dernier vérifie sa propre signature HMAC.
+
+Le générateur affiche une seule fois un secret sous la forme `<keyId>.<secret>` et une entrée
+hachée à ajouter à `API_KEYS`. Les appels présentent ensuite :
+
+```bash
+Authorization: Bearer <keyId>.<secret>
+```
+
+Les droits sont indépendants : `transfers:read`, `transfers:write`, `refunds:write`,
+`reconciliation:write`, `anchors:read`, `anchors:write` et `simulator:write`.
+`AUTH_ENABLED=false` est réservé au développement et bloque le démarrage en production.
+
 ---
 
 ## API
@@ -129,6 +152,7 @@ Pour travailler sans chaîne, `BLOCKCHAIN_ENABLED=false` : les transactions rest
 
 ```bash
 curl -X POST http://localhost:3000/api/v1/mobile-money/transactions \
+  -H 'Authorization: Bearer <keyId>.<secret>' \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: cmd-2026-0042' \
   -d '{
@@ -148,6 +172,7 @@ confirmation opérateur et exercer exactement le chemin webhook signé :
 ```bash
 curl -X POST \
   http://localhost:3000/api/v1/simulator/mobile-money/payments/AGG-20260725-A1B2C3D4E5F6/confirm \
+  -H 'Authorization: Bearer <keyId>.<secret>' \
   -H 'Content-Type: application/json' \
   -d '{}'
 ```
@@ -158,7 +183,9 @@ rejets. Le MSISDN et les IBAN sont masqués dans les réponses et les journaux.
 ### Vérifier l'intégrité
 
 ```bash
-curl http://localhost:3000/api/v1/transfers/TRF-20260725-02AC53WQ/verification
+curl \
+  -H 'Authorization: Bearer <keyId>.<secret>' \
+  http://localhost:3000/api/v1/transfers/TRF-20260725-02AC53WQ/verification
 ```
 
 ```json
@@ -187,32 +214,32 @@ curl http://localhost:3000/api/v1/transfers/TRF-20260725-02AC53WQ/verification
 }
 ```
 
-| Verdict | Signification |
-| --- | --- |
-| `VERIFIED` | Données intactes, inclusion confirmée par le contrat |
-| `PENDING_ANCHOR` | Données intactes, ancrage pas encore effectué |
-| `TAMPERED` | **Altération détectée** |
-| `NOT_SEALED` | Jamais scellée — aucune preuve disponible |
-| `CHAIN_UNAVAILABLE` | Contrôles hors chaîne concluants, nœud injoignable |
+| Verdict             | Signification                                        |
+| ------------------- | ---------------------------------------------------- |
+| `VERIFIED`          | Données intactes, inclusion confirmée par le contrat |
+| `PENDING_ANCHOR`    | Données intactes, ancrage pas encore effectué        |
+| `TAMPERED`          | **Altération détectée**                              |
+| `NOT_SEALED`        | Jamais scellée — aucune preuve disponible            |
+| `CHAIN_UNAVAILABLE` | Contrôles hors chaîne concluants, nœud injoignable   |
 
 ### Autres points d'entrée
 
-| Méthode | Route | Rôle |
-| --- | --- | --- |
-| `POST` | `/mobile-money/transactions` | Initie une collecte Mobile Money |
-| `GET` | `/mobile-money/transactions/{ref}` | Cycle agrégateur / banque / rapprochement |
-| `POST` | `/webhooks/mobile-money` | Callback agrégateur signé et idempotent |
-| `POST` | `/simulator/mobile-money/payments/{ref}/confirm` | Confirmation, rejet ou écart simulé |
-| `POST` | `/mobile-money/reconciliation/run` | Reprise des rapprochements éligibles |
-| `POST` | `/transfers` | Ancien flux de virement conservé pour compatibilité |
-| `GET` | `/transfers` | Liste paginée, filtres `status` et `currency` |
-| `GET` | `/transfers/{ref}` | Statut d'un virement |
-| `GET` | `/transfers/{ref}/audit` | Piste d'audit (payloads XML masqués) |
-| `GET` | `/anchors/batches` | Lots d'ancrage et leurs transactions blockchain |
-| `GET` | `/anchors/batches/{id}` | Détail d'un lot |
-| `POST` | `/anchors/batches` | Ancrage immédiat (exploitation / démonstration) |
-| `GET` | `/anchors/statistics` | Répartition par état d'ancrage |
-| `GET` | `/health` | PostgreSQL, client SOAP, schémas XSD, blockchain |
+| Méthode | Route                                            | Rôle                                                |
+| ------- | ------------------------------------------------ | --------------------------------------------------- |
+| `POST`  | `/mobile-money/transactions`                     | Initie une collecte Mobile Money                    |
+| `GET`   | `/mobile-money/transactions/{ref}`               | Cycle agrégateur / banque / rapprochement           |
+| `POST`  | `/webhooks/mobile-money`                         | Callback agrégateur signé et idempotent             |
+| `POST`  | `/simulator/mobile-money/payments/{ref}/confirm` | Confirmation, rejet ou écart simulé                 |
+| `POST`  | `/mobile-money/reconciliation/run`               | Reprise des rapprochements éligibles                |
+| `POST`  | `/transfers`                                     | Ancien flux de virement conservé pour compatibilité |
+| `GET`   | `/transfers`                                     | Liste paginée, filtres `status` et `currency`       |
+| `GET`   | `/transfers/{ref}`                               | Statut d'un virement                                |
+| `GET`   | `/transfers/{ref}/audit`                         | Piste d'audit (payloads XML masqués)                |
+| `GET`   | `/anchors/batches`                               | Lots d'ancrage et leurs transactions blockchain     |
+| `GET`   | `/anchors/batches/{id}`                          | Détail d'un lot                                     |
+| `POST`  | `/anchors/batches`                               | Ancrage immédiat (exploitation / démonstration)     |
+| `GET`   | `/anchors/statistics`                            | Répartition par état d'ancrage                      |
+| `GET`   | `/health`                                        | PostgreSQL, client SOAP, schémas XSD, blockchain    |
 
 ---
 
@@ -299,11 +326,11 @@ ne contrôle plus.
 
 Voici la défense en profondeur, telle que réellement exercée sur cette implémentation :
 
-| Ce que fait l'attaquant (accès total en écriture à la base) | Contrôle qui cède | Verdict |
-| --- | --- | --- |
-| Modifie l'IBAN du bénéficiaire | `fingerprintMatches` → `false` | `TAMPERED` |
-| …et réaligne l'empreinte stockée | `merkleProofValid` → `false` | `TAMPERED` |
-| …et forge une racine de Merkle cohérente | `onChainRootMatches` → `false` | `TAMPERED` |
+| Ce que fait l'attaquant (accès total en écriture à la base) | Contrôle qui cède              | Verdict    |
+| ----------------------------------------------------------- | ------------------------------ | ---------- |
+| Modifie l'IBAN du bénéficiaire                              | `fingerprintMatches` → `false` | `TAMPERED` |
+| …et réaligne l'empreinte stockée                            | `merkleProofValid` → `false`   | `TAMPERED` |
+| …et forge une racine de Merkle cohérente                    | `onChainRootMatches` → `false` | `TAMPERED` |
 
 À la dernière ligne, tous les contrôles internes passent — et la chaîne tranche seule. Falsifier un
 virement supposerait de réécrire l'historique de la chaîne.
@@ -314,14 +341,14 @@ virement supposerait de réécrire l'historique de la chaîne.
 
 ### Où vivent les IBAN complets
 
-| Destination | IBAN complet ? |
-| --- | --- |
-| Table `transactions` | **Oui** — nécessaire à l'exécution du virement |
+| Destination                   | IBAN complet ?                                      |
+| ----------------------------- | --------------------------------------------------- |
+| Table `transactions`          | **Oui** — nécessaire à l'exécution du virement      |
 | Document scellé (transitoire) | **Oui** — c'est l'objet de la preuve, jamais publié |
-| Réponses HTTP | Non — masqué `FR76****0189` |
-| Logs applicatifs | Non — masqué |
-| Table `audit_logs` | Non — masqué puis tronqué |
-| Blockchain | Non — seule une racine de Merkle y figure |
+| Réponses HTTP                 | Non — masqué `FR76****0189`                         |
+| Logs applicatifs              | Non — masqué                                        |
+| Table `audit_logs`            | Non — masqué puis tronqué                           |
+| Blockchain                    | Non — seule une racine de Merkle y figure           |
 
 Vérifié en exécution réelle : sur 445 lignes de log produites par un virement complet, **zéro**
 occurrence d'IBAN en clair.
@@ -333,7 +360,7 @@ dans un commentaire ou une balise non prévue est masqué quand même.
 ### Durcissement des parseurs
 
 Un parseur XML est une surface d'attaque classique. Avant tout parsing, la couche SOAP rejette
-`<!DOCTYPE`, `<!ENTITY` (XXE et *billion laughs*), `<?xml-stylesheet`, et toute réponse au-delà de
+`<!DOCTYPE`, `<!ENTITY` (XXE et _billion laughs_), `<?xml-stylesheet`, et toute réponse au-delà de
 `SOAP_MAX_RESPONSE_BYTES`. Le rejet est explicite plutôt que délégué au comportement par défaut
 d'une dépendance tierce.
 
@@ -362,18 +389,18 @@ métadonnées SOAP, puis les champs de scellement : `fingerprint`, `fingerprint_
 
 **`audit_logs`** — sens de l'échange (`DOCUMENT_VALIDATED`, `OUTBOUND_REQUEST`, `INBOUND_RESPONSE`,
 `INBOUND_FAULT`, `COMMUNICATION_ERROR`), payload masqué et tronqué, durée, code de faute,
-corrélation. Écriture *best-effort* : un échec d'audit ne fait jamais échouer la transaction métier.
+corrélation. Écriture _best-effort_ : un échec d'audit ne fait jamais échouer la transaction métier.
 
 **`anchor_batches`** — statut, racine de Merkle, nombre de feuilles, `chain_id`, adresse du contrat,
 `tx_hash`, numéro de bloc, gaz consommé, tentatives, dernière erreur.
 
 ### Contrats XSD
 
-| Schéma | Rôle |
-| --- | --- |
-| `transfer-request.xsd` | Demande — **validé à l'exécution** avant l'appel SOAP |
-| `transfer-record.xsd` | Enregistrement scellé — **validé à l'exécution** avant hachage |
-| `transfer-response.xsd` | Contrat de sortie de l'API — documentaire |
+| Schéma                  | Rôle                                                           |
+| ----------------------- | -------------------------------------------------------------- |
+| `transfer-request.xsd`  | Demande — **validé à l'exécution** avant l'appel SOAP          |
+| `transfer-record.xsd`   | Enregistrement scellé — **validé à l'exécution** avant hachage |
+| `transfer-response.xsd` | Contrat de sortie de l'API — documentaire                      |
 
 La clé de contrôle MOD 97-10 n'étant pas exprimable en XSD 1.0, elle reste vérifiée par
 `IsIbanConstraint` : le XSD ne valide que la structure.
@@ -422,18 +449,18 @@ Cinq bugs authentiques ont été détectés et corrigés pendant le développeme
 
 Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et un bouchon SOAP :
 
-| Scénario | Résultat observé |
-| --- | --- |
-| Virement nominal, service public réel | `201 COMPLETED` · *"one thousand two hundred and fifty dollars and seventy five cents"* · 1865 ms |
-| Rejeu avec la même `Idempotency-Key` | Référence identique, aucun second appel SOAP |
-| Timeout SOAP (`SOAP_TIMEOUT_MS=100`) | `504 SOAP_TIMEOUT` · 3 tentatives · `FAILED` |
-| Faute SOAP 1.1 et 1.2 (bouchon HTTP 500) | `502 SOAP_FAULT` · aucune reprise · faute persistée |
-| Arbre de Merkle vs `verifyInclusion` du contrat | Concordance sur 1, 2, 3, 5, 8 et 17 feuilles ; intrus rejeté |
-| Réécriture d'un lot déjà ancré | Rejetée — `BatchAlreadyAnchored` |
-| Ancrage par un compte non autorisé | Rejeté — `NotAuthorized` |
-| Ancrage de 3 virements | 1 transaction chaîne, bloc 10, **121 159 gaz** |
-| Falsification en base (3 niveaux) | `TAMPERED` aux trois niveaux (voir tableau plus haut) |
-| Fuite d'IBAN (logs + audit) | Aucune |
+| Scénario                                        | Résultat observé                                                                                  |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Virement nominal, service public réel           | `201 COMPLETED` · _"one thousand two hundred and fifty dollars and seventy five cents"_ · 1865 ms |
+| Rejeu avec la même `Idempotency-Key`            | Référence identique, aucun second appel SOAP                                                      |
+| Timeout SOAP (`SOAP_TIMEOUT_MS=100`)            | `504 SOAP_TIMEOUT` · 3 tentatives · `FAILED`                                                      |
+| Faute SOAP 1.1 et 1.2 (bouchon HTTP 500)        | `502 SOAP_FAULT` · aucune reprise · faute persistée                                               |
+| Arbre de Merkle vs `verifyInclusion` du contrat | Concordance sur 1, 2, 3, 5, 8 et 17 feuilles ; intrus rejeté                                      |
+| Réécriture d'un lot déjà ancré                  | Rejetée — `BatchAlreadyAnchored`                                                                  |
+| Ancrage par un compte non autorisé              | Rejeté — `NotAuthorized`                                                                          |
+| Ancrage de 3 virements                          | 1 transaction chaîne, bloc 10, **121 159 gaz**                                                    |
+| Falsification en base (3 niveaux)               | `TAMPERED` aux trois niveaux (voir tableau plus haut)                                             |
+| Fuite d'IBAN (logs + audit)                     | Aucune                                                                                            |
 
 ---
 
