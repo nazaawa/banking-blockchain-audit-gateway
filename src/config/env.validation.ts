@@ -14,6 +14,7 @@ type Rule = {
   min?: number;
   max?: number;
   exclusiveMax?: boolean;
+  minLength?: number;
   pattern?: RegExp;
   /** Description du format attendu, pour les regles `pattern`. */
   expected?: string;
@@ -58,6 +59,8 @@ const RULES: Rule[] = [
   { key: 'AUDIT_PERSIST_PAYLOADS', kind: 'boolean' },
   { key: 'SWAGGER_ENABLED', kind: 'boolean' },
   { key: 'AUTH_ENABLED', kind: 'boolean' },
+  { key: 'SECURITY_MASTER_KEY', kind: 'string', minLength: 32, secret: true },
+  { key: 'SECURITY_KEY_SALT', kind: 'string', minLength: 16 },
 
   { key: 'BLOCKCHAIN_ENABLED', kind: 'boolean' },
   { key: 'BLOCKCHAIN_RPC_URL', kind: 'url' },
@@ -86,6 +89,12 @@ const BOOLEANS = ['1', '0', 'true', 'false', 'yes', 'no', 'on', 'off'];
 function checkRule(rule: Rule, raw: string | undefined): string | null {
   if (raw === undefined || raw === '') {
     return rule.required ? `${rule.key} est requis mais absent` : null;
+  }
+
+  if (rule.minLength !== undefined && raw.length < rule.minLength) {
+    return rule.secret
+      ? `${rule.key} doit contenir au moins ${rule.minLength} caracteres (valeur masquee)`
+      : `${rule.key} doit contenir au moins ${rule.minLength} caracteres`;
   }
 
   if (rule.kind === 'pattern') {
@@ -165,6 +174,14 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
     }
     if (!read('API_KEYS').trim()) {
       errors.push('API_KEYS est requis en production : aucune cle declaree');
+    }
+    if (
+      !read('SECURITY_MASTER_KEY') ||
+      read('SECURITY_MASTER_KEY') === 'local-demo-master-key-a-remplacer'
+    ) {
+      errors.push(
+        'SECURITY_MASTER_KEY doit etre un secret explicite en production (valeur masquee)',
+      );
     }
   }
 

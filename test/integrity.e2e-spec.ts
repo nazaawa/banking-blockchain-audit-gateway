@@ -12,6 +12,7 @@ import { verifyProof } from '../src/blockchain/merkle.util';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { SoapClientService } from '../src/soap/soap-client.service';
 import type { AmountInWordsResult } from '../src/soap/soap.types';
+import { TransactionEvent } from '../src/events/entities/transaction-event.entity';
 import { E2E_AUTHORIZATION } from './setup-e2e';
 
 const DEBTOR_IBAN = 'FR7630006000011234567890189';
@@ -167,9 +168,48 @@ describe('Integrite des donnees de paiement (e2e)', () => {
 
       expect(opening.event_type).toBe('TRANSFER_INITIATED');
       expect(opening.record_format_version).toBe('2.0');
-      expect(opening.debtor_iban).toBe(DEBTOR_IBAN);
-      expect(opening.creditor_iban).toBe(CREDITOR_IBAN);
-      expect(opening.creditor_name).toBe('ACME GmbH');
+
+      // Lecture SQL brute : la base ne contient que du chiffre. C'est la seule
+      // maniere de le prouver — l'entite dechiffre de maniere transparente, donc
+      // toute lecture applicative montrerait le clair meme sans chiffrement.
+      expect(opening.debtor_iban).toMatch(/^enc\.v1\./);
+      expect(opening.creditor_iban).toMatch(/^enc\.v1\./);
+      expect(opening.creditor_name).toMatch(/^enc\.v1\./);
+      expect(opening.creditor_iban).not.toContain(CREDITOR_IBAN);
+
+      const [storedTransaction] = await dataSource.query<Array<Record<string, string>>>(
+        'SELECT debtor_iban, creditor_iban, creditor_name FROM transactions WHERE reference = $1',
+        [reference],
+      );
+      expect(storedTransaction.debtor_iban).toMatch(/^enc\.v1\./);
+      expect(storedTransaction.creditor_iban).toMatch(/^enc\.v1\./);
+      expect(storedTransaction.creditor_name).toMatch(/^enc\.v1\./);
+      expect(storedTransaction.creditor_iban).not.toContain(CREDITOR_IBAN);
+
+      // Et le clair reste accessible a l'application, sans quoi la verification
+      // d'integrite ne pourrait plus confronter la ligne au registre.
+      const decrypted = await dataSource
+        .getRepository(TransactionEvent)
+        .findOneByOrFail({ transactionReference: reference, sequence: 1 });
+
+      expect(decrypted.debtorIban).toBe(DEBTOR_IBAN);
+      expect(decrypted.creditorIban).toBe(CREDITOR_IBAN);
+      expect(decrypted.creditorName).toBe('ACME GmbH');
+    });
+
+    it('conserve les empreintes verifiables malgre le chiffrement', async () => {
+      const reference = await createTransfer();
+      await anchorService.processPendingBatch();
+
+      // Le document canonique est construit depuis le clair : le chiffrement
+      // vit sous l'entite. Si ce n'etait pas le cas, toutes les preuves deja
+      // publiees sur la chaine deviendraient invérifiables d'un seul coup.
+      const report = await verify(reference);
+
+      expect(report.verdict).toBe('VERIFIED');
+      expect(
+        report.events.every((event: { fingerprintMatches: boolean }) => event.fingerprintMatches),
+      ).toBe(true);
     });
 
     it('ne les repete pas sur les faits suivants', async () => {

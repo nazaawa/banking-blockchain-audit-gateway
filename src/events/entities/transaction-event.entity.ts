@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { encryptedColumn } from '../../security/field-cipher';
 import {
   Column,
   CreateDateColumn,
@@ -209,19 +210,43 @@ export class TransactionEvent {
   // resterait indetectable.
 
   @ApiPropertyOptional()
-  @Column({ name: 'debtor_iban', type: 'varchar', length: 34, nullable: true })
+  @Column({
+    name: 'debtor_iban',
+    type: 'varchar',
+    length: 512,
+    nullable: true,
+    transformer: encryptedColumn('transaction_events.debtor_iban'),
+  })
   debtorIban!: string | null;
 
   @ApiPropertyOptional()
-  @Column({ name: 'debtor_name', type: 'varchar', length: 140, nullable: true })
+  @Column({
+    name: 'debtor_name',
+    type: 'varchar',
+    length: 512,
+    nullable: true,
+    transformer: encryptedColumn('transaction_events.debtor_name'),
+  })
   debtorName!: string | null;
 
   @ApiPropertyOptional()
-  @Column({ name: 'creditor_iban', type: 'varchar', length: 34, nullable: true })
+  @Column({
+    name: 'creditor_iban',
+    type: 'varchar',
+    length: 512,
+    nullable: true,
+    transformer: encryptedColumn('transaction_events.creditor_iban'),
+  })
   creditorIban!: string | null;
 
   @ApiPropertyOptional()
-  @Column({ name: 'creditor_name', type: 'varchar', length: 140, nullable: true })
+  @Column({
+    name: 'creditor_name',
+    type: 'varchar',
+    length: 512,
+    nullable: true,
+    transformer: encryptedColumn('transaction_events.creditor_name'),
+  })
   creditorName!: string | null;
 
   @ApiPropertyOptional()

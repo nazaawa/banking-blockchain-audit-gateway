@@ -111,6 +111,17 @@ export const auditConfig = registerAs('audit', () => ({
  */
 const LOCAL_DEV_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
+/**
+ * Secrets de la passerelle.
+ *
+ * `masterKey` n'est jamais utilise directement : la garde en derive des cles par
+ * usage, afin qu'une compromission n'en livre pas d'autres.
+ */
+export const securityConfig = registerAs('security', () => ({
+  masterKey: process.env.SECURITY_MASTER_KEY ?? 'local-demo-master-key-a-remplacer',
+  keySalt: process.env.SECURITY_KEY_SALT ?? 'banking-gateway-hkdf-salt',
+}));
+
 export const blockchainConfig = registerAs('blockchain', () => ({
   enabled: toBool(process.env.BLOCKCHAIN_ENABLED, true),
   rpcUrl: process.env.BLOCKCHAIN_RPC_URL ?? 'http://127.0.0.1:8545',
@@ -154,6 +165,7 @@ export const configurations = [
   mobileMoneyConfig,
   auditConfig,
   authConfig,
+  securityConfig,
   blockchainConfig,
   anchorConfig,
 ];

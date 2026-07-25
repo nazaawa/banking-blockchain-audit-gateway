@@ -1,7 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
-import { Contract, JsonRpcProvider, NonceManager, Wallet, isAddress } from 'ethers';
+import { Contract, JsonRpcProvider, isAddress } from 'ethers';
 import { blockchainConfig } from '../config/configuration';
+import { KEY_CUSTODY_PORT, type KeyCustodyPort } from '../security/key-custody.port';
 import artifact from './contracts/AuditAnchor.json';
 import { uuidToBytes32 } from './fingerprint.util';
 
@@ -47,6 +48,8 @@ export class EvmAnchorClient {
   private provider: JsonRpcProvider | null = null;
 
   constructor(
+    @Inject(KEY_CUSTODY_PORT)
+    private readonly custody: KeyCustodyPort,
     @Inject(blockchainConfig.KEY)
     private readonly config: ConfigType<typeof blockchainConfig>,
   ) {}
@@ -57,7 +60,7 @@ export class EvmAnchorClient {
     merkleRoot: string,
     leafCount: number,
   ): Promise<AnchorReceipt> {
-    const contract = this.getContract();
+    const contract = await this.getContract();
     const onChainId = uuidToBytes32(batchId);
 
     try {
@@ -95,7 +98,7 @@ export class EvmAnchorClient {
 
   /** Relit un lot depuis la chaine — source de verite du controle d'integrite. */
   async getBatch(batchId: string): Promise<OnChainBatch | null> {
-    const contract = this.getContract();
+    const contract = await this.getContract();
     const onChainId = uuidToBytes32(batchId);
 
     try {
@@ -127,7 +130,7 @@ export class EvmAnchorClient {
    * transaction absente du lot pour ancree.
    */
   async verifyInclusion(batchId: string, leaf: string, proof: readonly string[]): Promise<boolean> {
-    const contract = this.getContract();
+    const contract = await this.getContract();
     try {
       return (await contract.verifyInclusion(uuidToBytes32(batchId), leaf, proof)) as boolean;
     } catch (error) {
@@ -136,8 +139,8 @@ export class EvmAnchorClient {
   }
 
   /** Adresse du compte utilise pour soumettre les ancrages. */
-  getSubmitterAddress(): string {
-    return new Wallet(this.config.privateKey).address;
+  async getSubmitterAddress(): Promise<string> {
+    return this.custody.getAnchorAddress();
   }
 
   /** Sonde de sante : le noeud repond-il et le contrat est-il deploye ? */
@@ -158,7 +161,7 @@ export class EvmAnchorClient {
     return this.provider;
   }
 
-  private getContract(): Contract {
+  private async getContract(): Promise<Contract> {
     if (this.contract) return this.contract;
 
     if (!isAddress(this.config.contractAddress)) {
@@ -168,10 +171,9 @@ export class EvmAnchorClient {
       );
     }
 
-    // NonceManager : ethers met en cache `eth_getTransactionCount`, ce qui rejoue
-    // le meme nonce sur deux ancrages rapproches. Le gestionnaire de nonce
-    // serialise les envois et evite ce rejet « nonce too low ».
-    const signer = new NonceManager(new Wallet(this.config.privateKey, this.getProvider()));
+    // La cle n'est plus lue ici : la garde renvoie un signataire, jamais le
+    // secret. Un adaptateur KMS peut ainsi ne jamais le divulguer.
+    const signer = await this.custody.getAnchorSigner(this.getProvider());
 
     this.contract = new Contract(this.config.contractAddress, artifact.abi, signer);
     return this.contract;

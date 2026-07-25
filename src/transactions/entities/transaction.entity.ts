@@ -10,6 +10,7 @@ import {
   UpdateDateColumn,
   VersionColumn,
 } from 'typeorm';
+import { encryptedColumn } from '../../security/field-cipher';
 import { AnchorBatch } from '../../blockchain/entities/anchor-batch.entity';
 import { AnchorStatus } from '../../blockchain/enums/anchor-status.enum';
 import {
@@ -100,16 +101,37 @@ export class Transaction {
   })
   paymentChannel!: PaymentChannel;
 
-  @Column({ name: 'debtor_iban', type: 'varchar', length: 34 })
+  @Column({
+    name: 'debtor_iban',
+    type: 'varchar',
+    length: 512,
+    transformer: encryptedColumn('transactions.debtor_iban'),
+  })
   debtorIban!: string;
 
-  @Column({ name: 'debtor_name', type: 'varchar', length: 140, nullable: true })
+  @Column({
+    name: 'debtor_name',
+    type: 'varchar',
+    length: 512,
+    nullable: true,
+    transformer: encryptedColumn('transactions.debtor_name'),
+  })
   debtorName!: string | null;
 
-  @Column({ name: 'creditor_iban', type: 'varchar', length: 34 })
+  @Column({
+    name: 'creditor_iban',
+    type: 'varchar',
+    length: 512,
+    transformer: encryptedColumn('transactions.creditor_iban'),
+  })
   creditorIban!: string;
 
-  @Column({ name: 'creditor_name', type: 'varchar', length: 140 })
+  @Column({
+    name: 'creditor_name',
+    type: 'varchar',
+    length: 512,
+    transformer: encryptedColumn('transactions.creditor_name'),
+  })
   creditorName!: string;
 
   @Column({ type: 'numeric', precision: 18, scale: 2, transformer: numericTransformer })
