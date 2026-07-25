@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Transaction } from '../transactions/entities/transaction.entity';
+import { TransactionEvent } from '../events/entities/transaction-event.entity';
 import { XmlModule } from '../xml/xml.module';
 import { AnchorService } from './anchor.service';
 import { AnchorsController } from './anchors.controller';
@@ -18,7 +19,7 @@ import { IntegrityVerificationService } from './integrity-verification.service';
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([AnchorBatch, Transaction]),
+    TypeOrmModule.forFeature([AnchorBatch, Transaction, TransactionEvent]),
     ScheduleModule.forRoot(),
     XmlModule,
   ],
