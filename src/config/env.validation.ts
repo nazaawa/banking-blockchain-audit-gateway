@@ -85,9 +85,9 @@ function checkRule(rule: Rule, raw: string | undefined): string | null {
 }
 
 export function validateEnv(config: Record<string, unknown>): Record<string, unknown> {
-  const errors = RULES.map((rule) => checkRule(rule, config[rule.key] as string | undefined)).filter(
-    (error): error is string => error !== null,
-  );
+  const errors = RULES.map((rule) =>
+    checkRule(rule, config[rule.key] as string | undefined),
+  ).filter((error): error is string => error !== null);
 
   if (errors.length > 0) {
     throw new Error(

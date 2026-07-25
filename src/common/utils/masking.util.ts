@@ -36,7 +36,15 @@ const IBAN_KEYS = new Set([
 ]);
 
 /** Cles traitees comme un identifiant partiellement masquable (BIC, PAN...). */
-const PARTIAL_KEYS = new Set(['bic', 'swift', 'pan', 'cardnumber', 'card_number', 'phone', 'email']);
+const PARTIAL_KEYS = new Set([
+  'bic',
+  'swift',
+  'pan',
+  'cardnumber',
+  'card_number',
+  'phone',
+  'email',
+]);
 
 export const REDACTED = '[REDACTED]';
 
@@ -144,10 +152,13 @@ const XML_TAG_PATTERN = new RegExp(
  */
 export function maskXml(xml: string): string {
   return maskFreeText(
-    xml.replace(XML_TAG_PATTERN, (_match, open: string, tag: string, content: string, close: string) => {
-      const masked = IBAN_KEYS.has(normalizeKey(tag)) ? maskIban(content.trim()) : REDACTED;
-      return `${open}${masked}${close}`;
-    }),
+    xml.replace(
+      XML_TAG_PATTERN,
+      (_match, open: string, tag: string, content: string, close: string) => {
+        const masked = IBAN_KEYS.has(normalizeKey(tag)) ? maskIban(content.trim()) : REDACTED;
+        return `${open}${masked}${close}`;
+      },
+    ),
   );
 }
 

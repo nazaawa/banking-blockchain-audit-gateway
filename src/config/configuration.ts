@@ -47,7 +47,8 @@ export const databaseConfig = registerAs('database', () => ({
 
 export const soapConfig = registerAs('soap', () => ({
   endpoint:
-    process.env.SOAP_ENDPOINT ?? 'https://www.dataaccess.com/webservicesserver/NumberConversion.wso',
+    process.env.SOAP_ENDPOINT ??
+    'https://www.dataaccess.com/webservicesserver/NumberConversion.wso',
   /** `local` : WSDL embarque (aucun appel reseau au boot) — `remote` : WSDL telecharge. */
   wsdlSource: (process.env.SOAP_WSDL_SOURCE ?? 'local').toLowerCase() as 'local' | 'remote',
   wsdlUrl:
@@ -78,10 +79,4 @@ export const auditConfig = registerAs('audit', () => ({
   persistPayloads: toBool(process.env.AUDIT_PERSIST_PAYLOADS, true),
 }));
 
-export const configurations = [
-  appConfig,
-  databaseConfig,
-  soapConfig,
-  businessConfig,
-  auditConfig,
-];
+export const configurations = [appConfig, databaseConfig, soapConfig, businessConfig, auditConfig];

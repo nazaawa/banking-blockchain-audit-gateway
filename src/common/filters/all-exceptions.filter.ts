@@ -19,6 +19,9 @@ import {
 
 const PG_UNIQUE_VIOLATION = '23505';
 
+/** Seuil au-dela duquel une erreur est journalisee en `error` plutot qu'en `warn`. */
+const SERVER_ERROR_THRESHOLD = 500;
+
 interface NormalizedError {
   statusCode: number;
   error: string;
@@ -71,7 +74,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       ...(normalized.internal ? { internal: normalized.internal } : {}),
     };
 
-    if (normalized.statusCode >= HttpStatus.INTERNAL_SERVER_ERROR) {
+    if (normalized.statusCode >= SERVER_ERROR_THRESHOLD) {
       this.logger.error({
         ...logPayload,
         stack: exception instanceof Error ? exception.stack : undefined,
@@ -97,7 +100,11 @@ export class AllExceptionsFilter implements ExceptionFilter {
         internal: exception.message,
       };
     }
-    if (exception instanceof QueryFailedError) return this.fromQueryFailed(exception);
+    // `instanceof` ne resout pas le parametre generique de QueryFailedError :
+    // on le fixe explicitement pour rester en typage strict.
+    if (exception instanceof QueryFailedError) {
+      return this.fromQueryFailed(exception as QueryFailedError<Error>);
+    }
 
     return {
       statusCode: HttpStatus.INTERNAL_SERVER_ERROR,

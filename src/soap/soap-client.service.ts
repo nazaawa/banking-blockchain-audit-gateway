@@ -99,7 +99,8 @@ export class SoapClientService implements OnModuleDestroy {
   private async invoke(operation: string, args: Record<string, unknown>): Promise<SoapExchange> {
     const correlationId = getCorrelationId();
     const maxAttempts = Math.max(1, this.config.maxRetries + 1);
-    let lastError: unknown;
+    // `normalizeError` garantit une instance d'Error : le typage le reflete.
+    let lastError: Error | undefined;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const startedAt = Date.now();
@@ -162,7 +163,7 @@ export class SoapClientService implements OnModuleDestroy {
           attempt,
           maxAttempts,
           durationMs: Date.now() - startedAt,
-          reason: (lastError as Error).message,
+          reason: lastError.message,
         });
 
         if (isLastAttempt) throw lastError;
