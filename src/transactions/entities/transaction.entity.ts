@@ -1,4 +1,5 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -36,6 +37,39 @@ const numericTransformer = {
 };
 
 /** Demande de virement enregistree par l'API. */
+/**
+ * Invariants entre dimensions de statut, imposes par la base.
+ *
+ * Ils reprennent ceux de `TransactionStateMachine`. Le doublon est voulu : la
+ * machine arrete l'erreur au plus pres de sa cause et la nomme, la base ferme
+ * ce qui la contourne — script d'exploitation, correctif manuel, futur service.
+ *
+ * Ils sont declares ici **et** en migration : sans le decorateur, `synchronize`
+ * les supprimerait silencieusement en developpement.
+ *
+ * Seule la table de transitions reste applicative : elle a besoin de connaitre
+ * l'etat de depart, qu'une contrainte `CHECK` ne voit pas.
+ */
+@Check(
+  'CHK_transactions_bank_requires_provider',
+  `"payment_channel"::text <> 'MOBILE_MONEY' OR "bank_status" IS NULL OR "bank_status"::text = 'NOT_STARTED' OR "provider_status"::text = 'CONFIRMED'`,
+)
+@Check(
+  'CHK_transactions_refund_requires_collection',
+  `"payment_channel"::text <> 'MOBILE_MONEY' OR "refund_status" IS NULL OR "refund_status"::text = 'NOT_REQUIRED' OR "provider_status"::text = 'CONFIRMED'`,
+)
+@Check(
+  'CHK_transactions_resolved_case_needs_extinct_debt',
+  `"case_status"::text <> 'RESOLVED' OR "refund_status" IS NULL OR "refund_status"::text IN ('COMPLETED', 'NOT_REQUIRED')`,
+)
+@Check(
+  'CHK_transactions_matched_needs_both_legs',
+  `"reconciliation_status"::text <> 'MATCHED' OR "payment_channel"::text <> 'MOBILE_MONEY' OR ("provider_status"::text = 'CONFIRMED' AND "bank_status"::text = 'COMPLETED')`,
+)
+@Check(
+  'CHK_transactions_blocked_bank_needs_gap',
+  `"bank_status"::text <> 'BLOCKED' OR "reconciliation_status"::text IN ('AMOUNT_MISMATCH', 'CURRENCY_MISMATCH')`,
+)
 @Entity('transactions')
 @Index('idx_transactions_status', ['status'])
 @Index('idx_transactions_created_at', ['createdAt'])
