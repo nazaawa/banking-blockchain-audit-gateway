@@ -2,8 +2,9 @@
 
 Passerelle bancaire simulée qui reçoit un paiement **Mobile Money**, attend la confirmation signée
 d'un agrégateur, déclenche l'intégration bancaire **SOAP**, rapproche les deux jambes dans
-**PostgreSQL**, consigne chaque fait métier dans un **registre append-only**, puis publie sur une
-**blockchain** une **preuve cryptographique** du dossier une fois celui-ci clos.
+**PostgreSQL**, consigne chaque fait métier dans un **registre append-only**, en tire une
+**comptabilité en partie double**, puis publie sur une **blockchain** une **preuve cryptographique**
+du dossier une fois celui-ci clos.
 
 > La blockchain ne porte **aucun** paiement et **aucune** donnée bancaire. Elle sert de registre
 > d'audit inviolable : seule une racine de Merkle de 32 octets y est publiée, dont on ne peut rien
@@ -39,6 +40,10 @@ POST /api/v1/webhooks/mobile-money
 [asynchrone, périodique]
    └─ Clôtures en attente → arbre de Merkle → racine publiée sur la chaîne
                           → une clôture engage récursivement tout l'historique
+
+[exploitation]
+   └─ POST /treasury/sweeps → SETTLEMENT_SWEPT sur les dossiers soldés
+                            → fonds rapatriés de l'agrégateur vers la banque
 
 GET /api/v1/transfers/{ref}/verification
    └─ Rejoue chaque fait · vérifie le chaînage · confronte la ligne au registre
@@ -307,6 +312,9 @@ C'est l'extinction de la dette qui autorise la clôture, donc l'ancrage.
 | `GET`   | `/anchors/batches/{id}`                          | Détail d'un lot                                  |
 | `POST`  | `/anchors/batches`                               | Ancrage immédiat (exploitation / démonstration)  |
 | `GET`   | `/anchors/statistics`                            | Répartition par état d'ancrage                   |
+| `GET`   | `/ledger/balance`                                | Soldes comptables par compte                     |
+| `GET`   | `/ledger/transfers/{ref}/entries`                | Écritures d'une transaction                      |
+| `POST`  | `/treasury/sweeps`                               | Rapatriement des fonds — idempotent              |
 | `GET`   | `/health`                                        | PostgreSQL, client SOAP, schémas XSD, blockchain |
 
 ---
@@ -627,13 +635,13 @@ des crédits, ou la base refuse l'écriture.
 
 ### Le plan de comptes
 
-| Compte | Nature | Ce qu'il représente |
-| --- | --- | --- |
-| `PROVIDER_FLOAT` | actif | Fonds encaissés et détenus chez l'agrégateur |
-| `SETTLEMENT` | actif | Compte bancaire de la passerelle |
-| `CREDITOR_PAYABLE` | passif | Dû au bénéficiaire tant que la banque n'a pas exécuté |
-| `PAYER_PAYABLE` | passif | Dû au payeur — dette née d'un écart ou d'un échec |
-| `FEE_REVENUE` | produit | Commission retenue sur un service effectivement rendu |
+| Compte             | Nature  | Ce qu'il représente                                   |
+| ------------------ | ------- | ----------------------------------------------------- |
+| `PROVIDER_FLOAT`   | actif   | Fonds encaissés et détenus chez l'agrégateur          |
+| `SETTLEMENT`       | actif   | Compte bancaire de la passerelle                      |
+| `CREDITOR_PAYABLE` | passif  | Dû au bénéficiaire tant que la banque n'a pas exécuté |
+| `PAYER_PAYABLE`    | passif  | Dû au payeur — dette née d'un écart ou d'un échec     |
+| `FEE_REVENUE`      | produit | Commission retenue sur un service effectivement rendu |
 
 **Le virement classique n'y figure pas.** Il instruit la banque sans jamais détenir de fonds : lui
 inventer une existence comptable serait faux. Un test le verrouille.
@@ -643,16 +651,16 @@ inventer une existence comptable serait faux. Un test le verrouille.
 ```
 PROVIDER_CONFIRMED 1250.75          AMOUNT_MISMATCH_DETECTED (1200 encaissés ≠ 1250.75 commandés)
   D  provider_float    1250.75        D  provider_float    1200.00
-  C  creditor_payable  1232.99        C  payer_payable     1200.00
+  C  creditor_payable  1231.99        C  payer_payable     1200.00
   C  fee_revenue         18.76      → aucune commission : aucun service rendu
 
 SETTLEMENT_SWEPT                    BANK_PROCESSING_FAILED
-  D  settlement        1250.75        D  creditor_payable  1232.99
+  D  settlement        1250.75        D  creditor_payable  1231.99
   C  provider_float    1250.75        D  fee_revenue         18.76
                                       C  payer_payable     1250.75
 BANK_PROCESSING_COMPLETED           → la commission est contre-passée : facturer un
-  D  creditor_payable  1232.99        échec serait indéfendable
-  C  settlement        1232.99
+  D  creditor_payable  1231.99        échec serait indéfendable
+  C  settlement        1231.99
                                     REFUND_COMPLETED
                                       D  payer_payable     1200.00
                                       C  provider_float    1200.00
@@ -703,11 +711,11 @@ curl -H 'Authorization: Bearer <keyId>.<secret>' \
   'http://localhost:3000/api/v1/ledger/balance?reference=TRF-20260725-C5WMM0G1'
 ```
 
-| Méthode | Route | Rôle |
-| ------- | ----- | ---- |
-| `GET` | `/ledger/balance` | Soldes par compte ; `difference` doit valoir zéro |
-| `GET` | `/ledger/transfers/{ref}/entries` | Écritures d'une transaction, avec leurs lignes |
-| `POST` | `/treasury/sweeps` | Rapatriement — idempotent |
+| Méthode | Route                             | Rôle                                              |
+| ------- | --------------------------------- | ------------------------------------------------- |
+| `GET`   | `/ledger/balance`                 | Soldes par compte ; `difference` doit valoir zéro |
+| `GET`   | `/ledger/transfers/{ref}/entries` | Écritures d'une transaction, avec leurs lignes    |
+| `POST`  | `/treasury/sweeps`                | Rapatriement — idempotent                         |
 
 Une balance **globale** portant sur plusieurs devises est refusée (`400`) plutôt que sommée :
 additionner des montants incompatibles produirait un total qui ne veut rien dire. Le paramètre
@@ -763,6 +771,9 @@ Couverture notable :
   protection append-only imposée par la base ;
 - **Machine à états** — chemins réels du flux acceptés, retours en arrière et états impossibles
   refusés, diagnostic complet plutôt que première violation ;
+- **Ledger** — équilibre sur chaque flux, écriture déséquilibrée refusée en SQL direct, dette
+  chiffrée puis éteinte au centime, commission acquise puis contre-passée, rapatriement idempotent,
+  virement classique sans aucune écriture ;
 - **Atomicité** — la consignation est mise en échec délibérément, et l'écriture métier doit avoir
   disparu. Éprouvé en rétablissant l'écriture dédoublée d'origine : le test échoue alors, ce qui
   établit qu'il porte bien sur la propriété et non sur son apparence ;
@@ -815,6 +826,8 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 | IBAN bénéficiaire falsifié en base              | `TAMPERED`, champ divergent nommé dans le rapport                                                 |
 | `UPDATE` sur un fait consigné                   | Rejeté par le déclencheur — `append-only`                                                         |
 | État impossible écrit en SQL direct             | Rejeté par les contraintes `CHECK` (3 cas éprouvés)                                               |
+| Écriture comptable déséquilibrée en SQL direct  | Rejetée au commit par le déclencheur d'équilibre                                                  |
+| Écart de 1200 sur 1250.75 commandés             | `PAYER_PAYABLE = 1200.00` — la dette porte un montant, non un drapeau                             |
 | Consignation en échec pendant une écriture      | Écriture métier annulée ; aucun dossier orphelin, rejeu possible                                  |
 | Fuite d'IBAN (logs + audit + API)               | Aucune                                                                                            |
 
@@ -829,6 +842,11 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 │   ├── transactions/               # Virement classique — orchestration
 │   │   └── state/                  #   machine à états : transitions + invariants
 │   ├── mobile-money/               # Collecte, webhook signé, rapprochement
+│   ├── accounting/                 # Ledger en partie double
+│   │   ├── posting-rules.ts        #   conséquence comptable de chaque fait
+│   │   ├── ledger-posting.service.ts
+│   │   └── ledger-guards.ts        #   équilibre + immuabilité, SQL partagé
+│   ├── treasury/                   # Rapatriement des fonds vers la banque
 │   ├── refunds/                    # Remboursement idempotent avec reprise
 │   │   ├── provider-refund.port.ts #   port fournisseur (adaptateur simulé)
 │   │   └── refunds.service.ts
@@ -885,3 +903,10 @@ Ce dépôt est une démonstration d'intégration, pas un service de paiement.
   preuve de synthèse.
 - **Pas de vérification en masse.** Le contrôle est unitaire ; un audit de bout en bout supposerait
   une revérification par lot.
+- **Pas de contre-passation exposée.** Le journal étant append-only, corriger une erreur comptable
+  suppose une écriture inverse ; aucun point d'entrée ne la propose encore.
+- **Le compte de règlement peut être négatif** entre le paiement du bénéficiaire et le rapatriement.
+  C'est comptablement exact — un découvert — et non une anomalie, mais une exploitation réelle
+  voudrait surveiller sa profondeur.
+- **Aucune clôture de période.** Les soldes sont cumulatifs depuis l'origine ; il n'existe ni
+  exercice, ni report à nouveau, ni états financiers.
