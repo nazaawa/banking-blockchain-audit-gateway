@@ -74,6 +74,19 @@ export class TransactionEventXmlBuilder {
       this.element('correlationId', event.correlationId, 1),
       this.optionalElement('detail', event.detail, 1),
       this.optionalElement('previousFingerprint', event.previousFingerprint, 1),
+
+      // Bloc present sur le seul evenement de cloture. Les autres documents
+      // restent serialises a l'identique : aucune empreinte anterieure ne bouge.
+      ...(event.closureEventCount !== null &&
+      event.closureEventCount !== undefined &&
+      event.closureChainHead
+        ? [
+            `${INDENT}<closure>`,
+            this.element('eventCount', String(event.closureEventCount), 2),
+            this.element('chainHead', event.closureChainHead, 2),
+            `${INDENT}</closure>`,
+          ]
+        : []),
       '</TransactionEvent>',
     ];
 

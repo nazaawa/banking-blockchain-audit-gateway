@@ -9,6 +9,7 @@ import { EventChainVerificationService } from './event-chain-verification.servic
 import { TransactionEventXmlBuilder } from './transaction-event-xml.builder';
 import { TransactionEventsService } from './transaction-events.service';
 import { TransactionEventsController } from './transaction-events.controller';
+import { Transaction } from '../transactions/entities/transaction.entity';
 
 /**
  * Registre append-only des faits metier.
@@ -18,7 +19,7 @@ import { TransactionEventsController } from './transaction-events.controller';
  * scellement d'un fait pourrait declencher un fait.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([TransactionEvent, AnchorBatch]), XmlModule],
+  imports: [TypeOrmModule.forFeature([TransactionEvent, AnchorBatch, Transaction]), XmlModule],
   controllers: [TransactionEventsController],
   providers: [
     AppendOnlyGuardInstaller,

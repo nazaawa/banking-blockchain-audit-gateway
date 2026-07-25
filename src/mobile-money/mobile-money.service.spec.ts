@@ -69,6 +69,7 @@ describe('MobileMoneyService — garde-fou sur le montant confirme', () => {
 
     eventLedger = {
       record: jest.fn(async () => ({}) as never),
+      closeCase: jest.fn(async () => null),
       findChain: jest.fn(async () => []),
       findLatest: jest.fn(async () => null),
     } as unknown as jest.Mocked<TransactionEventsService>;

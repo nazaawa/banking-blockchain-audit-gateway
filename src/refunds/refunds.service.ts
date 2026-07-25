@@ -79,6 +79,10 @@ export class RefundsService {
     const refund = await this.findOrCreate(transaction, requestedBy);
 
     if (refund.status === RefundStatus.COMPLETED) {
+      // Un incident apres la confirmation fournisseur peut avoir persiste le
+      // succes avant la cloture du registre. Le rejeu repare cette derniere
+      // idempotemment sans solliciter de nouveau le fournisseur.
+      await this.events.closeCase(transaction, 'Dossier clos apres remboursement du payeur');
       this.logger.log({
         event: 'refund.already-completed',
         reference: transactionReference,
@@ -274,6 +278,9 @@ export class RefundsService {
         `Remboursement confirme (${providerRefundReference})` +
         (deduplicated ? ' — reprise d une demande anterieure' : ''),
     });
+
+    // La dette est eteinte et le dossier resolu : plus aucun fait n'est attendu.
+    await this.events.closeCase(updated, 'Dossier clos apres remboursement du payeur');
 
     this.logger.log({
       event: 'refund.completed',

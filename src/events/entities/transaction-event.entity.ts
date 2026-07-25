@@ -1,6 +1,17 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Unique } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  Index,
+  JoinColumn,
+  ManyToOne,
+  PrimaryGeneratedColumn,
+  Unique,
+} from 'typeorm';
+import { AnchorBatch } from '../../blockchain/entities/anchor-batch.entity';
 import { AnchorStatus } from '../../blockchain/enums/anchor-status.enum';
+import { Transaction } from '../../transactions/entities/transaction.entity';
 import {
   BankProcessingStatus,
   CaseStatus,
@@ -42,6 +53,10 @@ const numericTransformer = {
 @Index('idx_transaction_events_type', ['eventType'])
 @Index('idx_transaction_events_anchor_status', ['anchorStatus'])
 @Index('idx_transaction_events_occurred_at', ['occurredAt'])
+@Index('uq_transaction_events_case_closed', ['transactionReference'], {
+  unique: true,
+  where: `"event_type" = 'CASE_CLOSED'`,
+})
 export class TransactionEvent {
   @ApiProperty({ format: 'uuid' })
   @PrimaryGeneratedColumn('uuid')
@@ -61,6 +76,16 @@ export class TransactionEvent {
   @ApiProperty({ example: 'TRF-20260725-8F3A2C71' })
   @Column({ name: 'transaction_reference', type: 'varchar', length: 32 })
   transactionReference!: string;
+
+  /**
+   * Relation declaree pour que l'integrite referentielle existe dans **tous** les
+   * modes de provisionnement : sans elle, `synchronize` supprimerait la
+   * contrainte creee par la migration, et un evenement orphelin — une preuve qui
+   * ne reference rien — redeviendrait possible en developpement.
+   */
+  @ManyToOne(() => Transaction, { onDelete: 'RESTRICT', nullable: false })
+  @JoinColumn({ name: 'transaction_reference', referencedColumnName: 'reference' })
+  transaction?: Transaction;
 
   @ApiPropertyOptional({ description: 'Reference cote agregateur / fournisseur' })
   @Column({ name: 'provider_reference', type: 'varchar', length: 64, nullable: true })
@@ -150,6 +175,19 @@ export class TransactionEvent {
   @Column({ name: 'previous_fingerprint', type: 'varchar', length: 66, nullable: true })
   previousFingerprint!: string | null;
 
+  /**
+   * Nombre total de faits du dossier, cloture comprise.
+   * Renseigne sur le seul evenement de cloture.
+   */
+  @ApiPropertyOptional({ example: 6 })
+  @Column({ name: 'closure_event_count', type: 'int', nullable: true })
+  closureEventCount!: number | null;
+
+  /** Sommet de chaine au moment de la cloture : engage tout l'historique. */
+  @ApiPropertyOptional()
+  @Column({ name: 'closure_chain_head', type: 'varchar', length: 66, nullable: true })
+  closureChainHead!: string | null;
+
   @ApiProperty({ description: 'Empreinte scellee, calculee avant insertion' })
   @Column({ type: 'varchar', length: 66 })
   fingerprint!: string;
@@ -175,6 +213,10 @@ export class TransactionEvent {
   @ApiPropertyOptional({ format: 'uuid' })
   @Column({ name: 'batch_id', type: 'uuid', nullable: true })
   batchId!: string | null;
+
+  @ManyToOne(() => AnchorBatch, { onDelete: 'RESTRICT', nullable: true })
+  @JoinColumn({ name: 'batch_id' })
+  batch?: AnchorBatch | null;
 
   @ApiPropertyOptional()
   @Column({ name: 'leaf_index', type: 'int', nullable: true })

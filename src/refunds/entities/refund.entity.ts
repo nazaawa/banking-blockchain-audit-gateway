@@ -4,9 +4,12 @@ import {
   CreateDateColumn,
   Entity,
   Index,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
+import { Transaction } from '../../transactions/entities/transaction.entity';
 import { RefundStatus } from '../../mobile-money/enums/mobile-money.enum';
 
 const numericTransformer = {
@@ -36,6 +39,10 @@ export class Refund {
   @ApiProperty({ example: 'TRF-20260725-8F3A2C71' })
   @Column({ name: 'transaction_reference', type: 'varchar', length: 32 })
   transactionReference!: string;
+
+  @ManyToOne(() => Transaction, { onDelete: 'RESTRICT', nullable: false })
+  @JoinColumn({ name: 'transaction_reference', referencedColumnName: 'reference' })
+  transaction?: Transaction;
 
   @ApiProperty({ enum: RefundStatus })
   @Column({ type: 'enum', enum: RefundStatus, default: RefundStatus.REQUIRED })

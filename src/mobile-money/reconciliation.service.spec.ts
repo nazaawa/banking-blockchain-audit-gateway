@@ -32,6 +32,7 @@ describe('ReconciliationService', () => {
   let service: ReconciliationService;
   let repository: jest.Mocked<Repository<Transaction>>;
   let anchor: jest.Mocked<AnchorService>;
+  let eventLedger: jest.Mocked<TransactionEventsService>;
 
   beforeEach(async () => {
     repository = {
@@ -41,16 +42,17 @@ describe('ReconciliationService', () => {
     anchor = {
       sealTransaction: jest.fn(async (value: Transaction) => value),
     } as unknown as jest.Mocked<AnchorService>;
+    eventLedger = {
+      record: jest.fn(async () => ({}) as never),
+      closeCase: jest.fn(async () => null),
+    } as unknown as jest.Mocked<TransactionEventsService>;
 
     const moduleRef = await Test.createTestingModule({
       providers: [
         ReconciliationService,
         { provide: getRepositoryToken(Transaction), useValue: repository },
         { provide: AnchorService, useValue: anchor },
-        {
-          provide: TransactionEventsService,
-          useValue: { record: jest.fn(async () => ({})) },
-        },
+        { provide: TransactionEventsService, useValue: eventLedger },
       ],
     }).compile();
     service = moduleRef.get(ReconciliationService);
@@ -62,6 +64,10 @@ describe('ReconciliationService', () => {
     expect(result.reconciliationStatus).toBe(ReconciliationStatus.MATCHED);
     expect(result.reconciledAt).toBeInstanceOf(Date);
     expect(anchor.sealTransaction).toHaveBeenCalledTimes(1);
+    expect(eventLedger.closeCase).toHaveBeenCalledWith(
+      result,
+      'Dossier clos apres rapprochement conforme',
+    );
   });
 
   it('scelle un ecart de montant au meme titre qu une concordance', async () => {
@@ -72,6 +78,19 @@ describe('ReconciliationService', () => {
     // Le rapprochement est tranche : l'issue est definitive et doit etre
     // opposable. Ne pas la sceller privait de preuve le dossier litigieux.
     expect(anchor.sealTransaction).toHaveBeenCalledTimes(1);
+    expect(eventLedger.closeCase).not.toHaveBeenCalled();
+  });
+
+  it('repare une cloture manquante sans dupliquer le verdict lors d un rejeu', async () => {
+    const alreadyMatched = payment({
+      reconciliationStatus: ReconciliationStatus.MATCHED,
+    });
+
+    await service.reconcile(alreadyMatched);
+
+    expect(eventLedger.record).not.toHaveBeenCalled();
+    expect(eventLedger.closeCase).toHaveBeenCalledTimes(1);
+    expect(anchor.sealTransaction).toHaveBeenCalledWith(alreadyMatched);
   });
 
   it('laisse en attente une transaction dont la banque n a pas termine', async () => {

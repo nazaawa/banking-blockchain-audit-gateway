@@ -3,10 +3,13 @@ import {
   CreateDateColumn,
   Entity,
   Index,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
   VersionColumn,
 } from 'typeorm';
+import { AnchorBatch } from '../../blockchain/entities/anchor-batch.entity';
 import { AnchorStatus } from '../../blockchain/enums/anchor-status.enum';
 import {
   BankProcessingStatus,
@@ -260,6 +263,10 @@ export class Transaction {
   /** Lot d'ancrage auquel la transaction a ete rattachee. */
   @Column({ name: 'batch_id', type: 'uuid', nullable: true })
   batchId!: string | null;
+
+  @ManyToOne(() => AnchorBatch, { onDelete: 'RESTRICT', nullable: true })
+  @JoinColumn({ name: 'batch_id' })
+  batch?: AnchorBatch | null;
 
   /** Position de la feuille dans l'arbre du lot : sans elle, la preuve est inverifiable. */
   @Column({ name: 'leaf_index', type: 'int', nullable: true })

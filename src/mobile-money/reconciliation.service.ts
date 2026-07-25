@@ -28,6 +28,14 @@ export class ReconciliationService {
   async reconcile(transaction: Transaction): Promise<Transaction> {
     if (transaction.paymentChannel !== PaymentChannel.MOBILE_MONEY) return transaction;
 
+    // Rejeu apres un incident local survenu entre le verdict et la cloture :
+    // ne pas recreer RECONCILIATION_MATCHED, mais reparer idempotemment la
+    // preuve de synthese puis le scellement eventuellement manquant.
+    if (transaction.reconciliationStatus === ReconciliationStatus.MATCHED) {
+      await this.events.closeCase(transaction, 'Dossier clos apres rapprochement conforme');
+      return this.anchorService.sealTransaction(transaction);
+    }
+
     if (
       transaction.providerStatus !== ProviderStatus.CONFIRMED ||
       transaction.bankStatus !== BankProcessingStatus.COMPLETED
@@ -74,6 +82,12 @@ export class ReconciliationService {
       observedCurrency: reconciled.aggregatorCurrency,
       detail: reconciled.reconciliationReason,
     });
+    // Un rapprochement conforme cloture le dossier : le virement a abouti et
+    // rien d'autre n'est attendu. Un ecart, lui, laisse le dossier ouvert.
+    if (reconciled.reconciliationStatus === ReconciliationStatus.MATCHED) {
+      await this.events.closeCase(reconciled, 'Dossier clos apres rapprochement conforme');
+    }
+
     this.logger.log({
       event: 'mobile-money.reconciled',
       reference: reconciled.reference,

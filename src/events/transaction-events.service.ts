@@ -75,6 +75,7 @@ export class TransactionEventsService {
 
     for (let attempt = 1; attempt <= MAX_SEQUENCE_ATTEMPTS; attempt += 1) {
       const previous = await this.findLatest(transaction.reference);
+      const isClosing = input.type === TransactionEventType.CASE_CLOSED;
 
       const draft: SerializableEvent = {
         id: randomUUID(),
@@ -96,6 +97,11 @@ export class TransactionEventsService {
         correlationId: transaction.correlationId || getCorrelationId(),
         detail: input.detail ?? null,
         previousFingerprint: previous?.fingerprint ?? null,
+        // Derives du sommet reel lu pour cette tentative. Si une insertion
+        // concurrente prend le rang, la tentative suivante recalcule les deux
+        // valeurs avec le nouveau sommet au lieu de sceller une synthese perimee.
+        closureEventCount: isClosing ? (previous?.sequence ?? 0) + 1 : null,
+        closureChainHead: isClosing ? (previous?.fingerprint ?? null) : null,
       };
 
       const xml = this.xmlBuilder.build(draft);
@@ -143,6 +149,55 @@ export class TransactionEventsService {
     );
   }
 
+  /**
+   * Clot le dossier par une preuve de synthese.
+   *
+   * ## Ce que la cloture apporte
+   *
+   * Le chainage protege l'ordre et le contenu, mais laisse une ouverture : la
+   * troncature de queue. Retirer les N derniers faits produit une chaine 1..M
+   * parfaitement coherente, indiscernable d'un dossier encore en cours.
+   *
+   * L'evenement de cloture declare le nombre total de faits et le sommet de
+   * chaine. Ancre, il rend la troncature detectable : le compte publie ne
+   * correspondrait plus a ce que la base contient.
+   *
+   * Il fournit accessoirement a un tiers une valeur unique de 32 octets qui
+   * engage tout le dossier, sans qu'il ait a conserver la chaine entiere.
+   *
+   * Idempotent : un dossier deja clos n'est jamais reclos.
+   */
+  async closeCase(transaction: Transaction, detail?: string): Promise<TransactionEvent | null> {
+    const chain = await this.findChain(transaction.reference);
+
+    if (chain.length === 0) return null;
+    if (chain.some((event) => event.eventType === TransactionEventType.CASE_CLOSED)) {
+      return null;
+    }
+
+    try {
+      return await this.record({
+        type: TransactionEventType.CASE_CLOSED,
+        transaction,
+        detail: detail ?? 'Dossier clos',
+      });
+    } catch (error) {
+      // L'index partiel garantit une seule cloture par dossier. Deux appels
+      // concurrents peuvent tous deux constater l'absence avant que l'un gagne
+      // l'insertion ; le perdant renvoie alors la cloture existante.
+      if (this.isUniqueViolation(error)) {
+        const existing = await this.events.findOne({
+          where: {
+            transactionReference: transaction.reference,
+            eventType: TransactionEventType.CASE_CLOSED,
+          },
+        });
+        if (existing) return existing;
+      }
+      throw error;
+    }
+  }
+
   /** Chaine complete d'une transaction, du plus ancien au plus recent. */
   async findChain(transactionReference: string): Promise<TransactionEvent[]> {
     return this.events.find({
@@ -164,11 +219,19 @@ export class TransactionEventsService {
   }
 
   private isSequenceCollision(error: unknown): boolean {
-    if (!(error instanceof QueryFailedError)) return false;
-    const driverError = error.driverError as { code?: string; constraint?: string } | undefined;
+    const driverError = this.driverError(error);
     return (
       driverError?.code === PG_UNIQUE_VIOLATION &&
       `${driverError.constraint ?? ''}`.includes('sequence')
     );
+  }
+
+  private isUniqueViolation(error: unknown): boolean {
+    return this.driverError(error)?.code === PG_UNIQUE_VIOLATION;
+  }
+
+  private driverError(error: unknown): { code?: string; constraint?: string } | undefined {
+    if (!(error instanceof QueryFailedError)) return undefined;
+    return error.driverError as { code?: string; constraint?: string } | undefined;
   }
 }

@@ -101,6 +101,25 @@
     </xs:sequence>
   </xs:complexType>
 
+  <xs:complexType name="ClosureType">
+    <xs:annotation>
+      <xs:documentation>
+        Preuve de synthese portee par l'evenement de cloture.
+
+        Le chainage protege deja l'ordre et le contenu, mais pas la troncature de
+        queue : retirer les N derniers faits laisse une chaine 1..M parfaitement
+        coherente. Declarer le nombre total de faits et le sommet de chaine,
+        puis confronter leur presence a l'etat final du dossier, rend cette
+        troncature detectable. Le sommet fournit aussi a un tiers une valeur
+        unique de 32 octets qui engage tout le dossier.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="eventCount" type="xs:positiveInteger"/>
+      <xs:element name="chainHead" type="tns:Bytes32Type"/>
+    </xs:sequence>
+  </xs:complexType>
+
   <xs:complexType name="TransactionEventType">
     <xs:sequence>
       <xs:element name="eventId" type="xs:string"/>
@@ -119,6 +138,12 @@
         distingue une chaine tronquee en tete d'une chaine complete.
       -->
       <xs:element name="previousFingerprint" type="tns:Bytes32Type" minOccurs="0"/>
+      <!--
+        Present sur le seul evenement de cloture. Place en fin de sequence :
+        les documents anterieurs restent serialises a l'identique, donc leurs
+        empreintes demeurent valides.
+      -->
+      <xs:element name="closure" type="tns:ClosureType" minOccurs="0"/>
     </xs:sequence>
     <xs:attribute name="version" type="xs:string" use="required"/>
   </xs:complexType>

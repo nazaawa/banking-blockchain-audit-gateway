@@ -23,10 +23,15 @@ interface EventBody {
   fingerprint: string;
   anchorStatus: string;
   batchId: string | null;
+  /** Renseignes sur le seul evenement de cloture. */
+  closureEventCount: number | null;
+  closureChainHead: string | null;
 }
 
 interface VerificationBody {
   verdict: string;
+  closed: boolean;
+  declaredEventCount: number | null;
   eventCount: number;
   anchoredCount: number;
   head: string | null;
@@ -35,6 +40,22 @@ interface VerificationBody {
     fingerprintMatches: boolean;
   }>;
 }
+
+const withoutAppendOnlyGuard = async (
+  dataSource: DataSource,
+  mutation: () => Promise<unknown>,
+): Promise<void> => {
+  await dataSource.query(
+    'ALTER TABLE transaction_events DISABLE TRIGGER trg_transaction_events_append_only',
+  );
+  try {
+    await mutation();
+  } finally {
+    await dataSource.query(
+      'ALTER TABLE transaction_events ENABLE TRIGGER trg_transaction_events_append_only',
+    );
+  }
+};
 
 const soapSuccess = (): AmountInWordsResult => ({
   amountInWords: 'mille deux cent cinquante',
@@ -301,6 +322,90 @@ describe('Registre d evenements (e2e)', () => {
   });
 
   // ==========================================================================
+
+  describe('Preuve de synthese', () => {
+    it('clot le dossier apres un rapprochement conforme', async () => {
+      const { reference, aggregator } = await initiate();
+      await confirm(aggregator, 1250.75);
+
+      const events = await chainOf(reference);
+      const closing = events.find((e) => e.eventType === 'CASE_CLOSED');
+
+      expect(closing).toBeDefined();
+      // Le compte declare inclut la cloture elle-meme.
+      expect(closing?.closureEventCount).toBe(events.length);
+      // Le sommet declare est l empreinte du fait qui la precede.
+      expect(closing?.closureChainHead).toBe(events[events.length - 2].fingerprint);
+      expect(closing?.sequence).toBe(events.length);
+    });
+
+    it('laisse ouvert un dossier litigieux non resolu', async () => {
+      const { reference, aggregator } = await initiate(1250.75);
+      await confirm(aggregator, 1.0);
+
+      const report = await verifyChain(reference);
+
+      // La dette n est pas eteinte : rien ne justifie de figer le total.
+      expect(report.closed).toBe(false);
+      expect(report.declaredEventCount).toBeNull();
+    });
+
+    it('ne clot jamais deux fois', async () => {
+      const { reference, aggregator } = await initiate();
+      await confirm(aggregator, 1250.75);
+
+      const closings = (await chainOf(reference)).filter((e) => e.eventType === 'CASE_CLOSED');
+      expect(closings).toHaveLength(1);
+    });
+
+    it('DETECTE une troncature de queue une fois le dossier clos', async () => {
+      const { reference, aggregator } = await initiate();
+      await confirm(aggregator, 1250.75);
+
+      const before = await verifyChain(reference);
+      expect(before.verdict).not.toBe('TAMPERED');
+      expect(before.closed).toBe(true);
+
+      // Retirer les deux derniers faits laisse une chaine 1..N-2 parfaitement
+      // coherente : ni le chainage ni la continuite des rangs ne la refusent.
+      // Seul le total declare par la cloture trahit la suppression.
+      const events = await chainOf(reference);
+      const removed = events.slice(-2).map((e) => e.sequence);
+      await withoutAppendOnlyGuard(dataSource, () =>
+        dataSource.query(
+          'DELETE FROM transaction_events WHERE transaction_reference = $1 AND sequence = ANY($2)',
+          [reference, removed],
+        ),
+      );
+
+      const after = await verifyChain(reference);
+
+      // La cloture a disparu avec la queue : le dossier ne se declare plus clos,
+      // ce qui contredit l etat resolu de la transaction.
+      expect(after.eventCount).toBe(events.length - 2);
+      expect(after.closed).toBe(false);
+      expect(after.verdict).toBe('TAMPERED');
+    });
+
+    it('DETECTE la suppression d un fait intermediaire malgre la cloture', async () => {
+      const { reference, aggregator } = await initiate();
+      await confirm(aggregator, 1250.75);
+
+      await withoutAppendOnlyGuard(dataSource, () =>
+        dataSource.query(
+          'DELETE FROM transaction_events WHERE transaction_reference = $1 AND sequence = 2',
+          [reference],
+        ),
+      );
+
+      const report = await verifyChain(reference);
+
+      expect(report.verdict).toBe('TAMPERED');
+      // Deux controles independants la denoncent : le total declare et la
+      // continuite des rangs.
+      expect(report.declaredEventCount).not.toBe(report.eventCount);
+    });
+  });
 
   describe('Verification', () => {
     it('signale une chaine non encore ancree sans crier a l alteration', async () => {

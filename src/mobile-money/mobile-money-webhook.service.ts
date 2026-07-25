@@ -229,7 +229,11 @@ export class MobileMoneyWebhookService {
     payload: MobileMoneyWebhookDto,
   ): Promise<Transaction> {
     const claim = await this.mobileMoney.confirmAndClaimBankProcessing(transaction, payload);
-    if (!claim.claimed) return claim.transaction;
+    if (!claim.claimed) {
+      return claim.transaction.reconciliationStatus === ReconciliationStatus.MATCHED
+        ? this.reconciliation.reconcile(claim.transaction)
+        : claim.transaction;
+    }
     return this.callBankAndReconcile(claim.transaction);
   }
 

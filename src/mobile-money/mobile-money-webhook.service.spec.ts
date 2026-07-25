@@ -104,6 +104,7 @@ describe('MobileMoneyWebhookService', () => {
 
     eventLedger = {
       record: jest.fn(async () => ({}) as never),
+      closeCase: jest.fn(async () => null),
       findChain: jest.fn(async () => []),
       findLatest: jest.fn(async () => null),
     } as unknown as jest.Mocked<TransactionEventsService>;
@@ -177,6 +178,22 @@ describe('MobileMoneyWebhookService', () => {
 
     expect(soap.convertAmountToWords).not.toHaveBeenCalled();
     expect(reconciliation.reconcile).not.toHaveBeenCalled();
+  });
+
+  it('repare la cloture d un rapprochement deja termine sans rappeler SOAP', async () => {
+    mobileMoney.confirmAndClaimBankProcessing.mockImplementation(async (value: Transaction) => ({
+      transaction: {
+        ...value,
+        reconciliationStatus: ReconciliationStatus.MATCHED,
+      },
+      claimed: false,
+    }));
+    const payload = webhook();
+
+    await service.handle(payload, service.sign(payload));
+
+    expect(soap.convertAmountToWords).not.toHaveBeenCalled();
+    expect(reconciliation.reconcile).toHaveBeenCalledTimes(1);
   });
 
   it('ne transforme pas un echec du registre en faux echec bancaire', async () => {

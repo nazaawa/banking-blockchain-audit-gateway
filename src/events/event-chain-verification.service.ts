@@ -8,7 +8,10 @@ import { computeFingerprint, toLeaf } from '../blockchain/fingerprint.util';
 import { verifyProof } from '../blockchain/merkle.util';
 import { SCHEMAS, XsdValidatorService } from '../xml/xsd-validator.service';
 import type { TransactionEvent } from './entities/transaction-event.entity';
+import { TransactionEventType } from './enums/transaction-event.enum';
 import { TransactionEventsService } from './transaction-events.service';
+import { Transaction } from '../transactions/entities/transaction.entity';
+import { ReconciliationStatus, RefundStatus } from '../mobile-money/enums/mobile-money.enum';
 
 /** Verdict porte sur un maillon de la chaine. */
 export interface EventVerification {
@@ -29,6 +32,10 @@ export interface EventVerification {
 export interface EventChainReport {
   transactionReference: string;
   verdict: 'VERIFIED' | 'TAMPERED' | 'PARTIALLY_ANCHORED' | 'EMPTY' | 'CHAIN_UNAVAILABLE';
+  /** Le dossier porte-t-il une preuve de synthese ? */
+  closed: boolean;
+  /** Nombre de faits declare par la cloture, s'il y en a une. */
+  declaredEventCount: number | null;
   eventCount: number;
   anchoredCount: number;
   /** Empreinte du dernier maillon : resume l'ensemble de la chaine. */
@@ -59,6 +66,8 @@ export class EventChainVerificationService {
   constructor(
     @InjectRepository(AnchorBatch)
     private readonly batches: Repository<AnchorBatch>,
+    @InjectRepository(Transaction)
+    private readonly transactions: Repository<Transaction>,
     private readonly eventsService: TransactionEventsService,
     private readonly xsdValidator: XsdValidatorService,
     private readonly client: EvmAnchorClient,
@@ -66,14 +75,24 @@ export class EventChainVerificationService {
 
   async verify(transactionReference: string): Promise<EventChainReport> {
     const chain = await this.eventsService.findChain(transactionReference);
+    const transaction = await this.transactions.findOne({
+      where: { reference: transactionReference },
+    });
     const findings: string[] = [];
     const verifiedAt = new Date();
 
     if (chain.length === 0) {
-      findings.push('Aucun evenement consigne pour cette transaction : rien a verifier.');
+      const closureExpected = this.isClosureExpected(transaction, chain);
+      findings.push(
+        closureExpected
+          ? 'Le dossier est dans un etat final mais toute sa chaine d evenements a disparu.'
+          : 'Aucun evenement consigne pour cette transaction : rien a verifier.',
+      );
       return {
         transactionReference,
-        verdict: 'EMPTY',
+        verdict: closureExpected ? 'TAMPERED' : 'EMPTY',
+        closed: false,
+        declaredEventCount: null,
         eventCount: 0,
         anchoredCount: 0,
         head: null,
@@ -87,6 +106,11 @@ export class EventChainVerificationService {
     let tampered = false;
     let chainUnavailable = false;
     let anchoredCount = 0;
+
+    if (!transaction) {
+      tampered = true;
+      findings.push('La transaction referencee par le registre est introuvable.');
+    }
 
     for (const [index, event] of chain.entries()) {
       const result = await this.verifyEvent(event, index === 0 ? null : chain[index - 1]);
@@ -113,6 +137,47 @@ export class EventChainVerificationService {
       );
     }
 
+    // --- Preuve de synthese --------------------------------------------------
+    //
+    // Le chainage et la continuite des rangs ne protegent pas la queue : retirer
+    // les N derniers faits laisse une chaine 1..M coherente. La cloture declare
+    // le total attendu, ce qui ferme cette derniere ouverture.
+    const closing = chain.find((event) => event.eventType === TransactionEventType.CASE_CLOSED);
+    const declaredEventCount = closing?.closureEventCount ?? null;
+    const closureExpected = this.isClosureExpected(transaction, chain);
+
+    if (closing) {
+      if (declaredEventCount !== chain.length) {
+        tampered = true;
+        findings.push(
+          `La cloture declare ${String(declaredEventCount)} faits, la chaine en compte ` +
+            `${chain.length} : des evenements ont ete retires.`,
+        );
+      }
+
+      const expectedHead = chain[chain.indexOf(closing) - 1]?.fingerprint ?? null;
+      if (
+        expectedHead !== null &&
+        closing.closureChainHead?.toLowerCase() !== expectedHead.toLowerCase()
+      ) {
+        tampered = true;
+        findings.push('Le sommet de chaine declare par la cloture ne correspond pas.');
+      }
+
+      if (closing.sequence !== chain.length) {
+        tampered = true;
+        findings.push(
+          'La cloture n est pas le dernier fait : des evenements ont ete ajoutes apres elle.',
+        );
+      }
+    } else if (closureExpected) {
+      tampered = true;
+      findings.push(
+        'Le dossier est dans un etat final mais son evenement de cloture est absent : ' +
+          'la queue du registre a ete tronquee ou la cloture n a pas ete consignee.',
+      );
+    }
+
     const head = chain[chain.length - 1].fingerprint;
 
     if (tampered) {
@@ -131,6 +196,12 @@ export class EventChainVerificationService {
         `Les ${chain.length} evenements sont intacts, ordonnes et ancres. ` +
           `Sommet de chaine : ${head}.`,
       );
+      findings.push(
+        closing
+          ? 'Dossier clos : le total declare fait foi, aucune troncature possible.'
+          : 'Dossier encore ouvert : la troncature de queue reste indetectable ' +
+              'tant qu aucune preuve de synthese ne fixe le total.',
+      );
     }
 
     return {
@@ -142,6 +213,8 @@ export class EventChainVerificationService {
           : anchoredCount < chain.length
             ? 'PARTIALLY_ANCHORED'
             : 'VERIFIED',
+      closed: closing !== undefined,
+      declaredEventCount,
       eventCount: chain.length,
       anchoredCount,
       head,
@@ -149,6 +222,29 @@ export class EventChainVerificationService {
       findings,
       verifiedAt,
     };
+  }
+
+  /**
+   * Une cloture est attendue des que l'etat courant ou un fait encore present
+   * prouve que le dossier a atteint une issue sans action restante.
+   *
+   * Croiser les deux sources est important : une troncature peut retirer le fait
+   * terminal, tandis qu'une alteration de la ligne courante peut tenter de
+   * masquer qu'elle etait finale.
+   */
+  private isClosureExpected(
+    transaction: Transaction | null,
+    chain: readonly TransactionEvent[],
+  ): boolean {
+    return (
+      transaction?.reconciliationStatus === ReconciliationStatus.MATCHED ||
+      transaction?.refundStatus === RefundStatus.COMPLETED ||
+      chain.some(
+        (event) =>
+          event.eventType === TransactionEventType.RECONCILIATION_MATCHED ||
+          event.eventType === TransactionEventType.REFUND_COMPLETED,
+      )
+    );
   }
 
   private async verifyEvent(

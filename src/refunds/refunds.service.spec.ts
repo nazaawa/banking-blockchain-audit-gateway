@@ -70,6 +70,7 @@ describe('RefundsService', () => {
 
     events = {
       record: jest.fn(async () => undefined),
+      closeCase: jest.fn(async () => null),
     } as unknown as jest.Mocked<TransactionEventsService>;
 
     provider = {
@@ -103,6 +104,10 @@ describe('RefundsService', () => {
     );
     expect(events.record).toHaveBeenCalledWith(
       expect.objectContaining({ type: TransactionEventType.REFUND_COMPLETED }),
+    );
+    expect(events.closeCase).toHaveBeenCalledWith(
+      transaction,
+      'Dossier clos apres remboursement du payeur',
     );
   });
 
