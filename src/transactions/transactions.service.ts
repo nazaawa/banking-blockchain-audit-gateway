@@ -29,6 +29,10 @@ import { Transaction } from './entities/transaction.entity';
 import { TransactionStatus } from './enums/transaction-status.enum';
 import { ReferenceGenerator } from './reference.generator';
 import { TransactionsRepository } from './transactions.repository';
+import { AnchorService } from '../blockchain/anchor.service';
+import { TransferXmlBuilder } from '../xml/transfer-xml.builder';
+import { SCHEMAS, XsdValidatorService } from '../xml/xsd-validator.service';
+import { XsdValidationException } from '../xml/exceptions/xml.exceptions';
 
 /** Nombre de generations de reference tentees avant abandon en cas de collision. */
 const MAX_REFERENCE_ATTEMPTS = 5;
@@ -52,6 +56,9 @@ export class TransactionsService {
     private readonly soapClient: SoapClientService,
     private readonly auditService: AuditService,
     private readonly referenceGenerator: ReferenceGenerator,
+    private readonly xmlBuilder: TransferXmlBuilder,
+    private readonly xsdValidator: XsdValidatorService,
+    private readonly anchorService: AnchorService,
     @Inject(businessConfig.KEY)
     private readonly config: ConfigType<typeof businessConfig>,
   ) {}
@@ -64,6 +71,11 @@ export class TransactionsService {
    */
   async initiateTransfer(dto: CreateTransferDto, idempotencyKey?: string): Promise<Transaction> {
     this.assertBusinessRules(dto);
+
+    // Transformation en XML canonique et validation contre le XSD. Ces controles
+    // sont locaux et instantanes : les faire avant la persistance evite de creer
+    // une transaction pour une demande qui ne franchira jamais le contrat.
+    const requestXml = await this.buildAndValidateRequestDocument(dto);
 
     if (idempotencyKey) {
       const existing = await this.repository.findByIdempotencyKey(idempotencyKey);
@@ -84,7 +96,44 @@ export class TransactionsService {
     // SOAP pour un seul virement.
     if (!isNew) return transaction;
 
-    return this.processTransaction(transaction);
+    return this.processTransaction(transaction, requestXml);
+  }
+
+  /**
+   * Serialise la demande en XML canonique et la valide contre
+   * `transfer-request.xsd`.
+   *
+   * Le XSD n'est pas redondant avec les decorateurs de DTO : il constitue le
+   * contrat formel opposable aux integrateurs, et il verrouille la forme exacte
+   * du document (ordre des elements, formatage des montants) qui conditionne le
+   * scellement cryptographique en aval.
+   */
+  private async buildAndValidateRequestDocument(dto: CreateTransferDto): Promise<string> {
+    const xml = this.xmlBuilder.buildTransferRequest(dto);
+
+    try {
+      await this.xsdValidator.assertValid(xml, SCHEMAS.transferRequest);
+      return xml;
+    } catch (error) {
+      if (error instanceof XsdValidationException) {
+        this.logger.warn({
+          event: 'transfer.xsd.rejected',
+          correlationId: getCorrelationId(),
+          schema: error.schemaName,
+          violations: error.violations.length,
+        });
+
+        throw new UnprocessableEntityException({
+          error: 'XSD_VALIDATION_FAILED',
+          message: 'Le document XML genere ne respecte pas le schema de la passerelle',
+          details: {
+            schema: error.schemaName,
+            violations: error.violations.map((violation) => violation.message),
+          },
+        });
+      }
+      throw error;
+    }
   }
 
   /** Retourne une transaction par sa reference fonctionnelle. */
@@ -232,9 +281,23 @@ export class TransactionsService {
   // -------------------------------------------------------------------------
 
   /** Appelle le service externe puis fait converger la transaction vers un statut terminal. */
-  private async processTransaction(transaction: Transaction): Promise<Transaction> {
+  private async processTransaction(
+    transaction: Transaction,
+    requestXml: string,
+  ): Promise<Transaction> {
     transaction.status = TransactionStatus.PROCESSING;
     await this.repository.save(transaction);
+
+    // Le document canonique valide rejoint la piste d'audit : c'est la trace de
+    // ce qui a effectivement franchi le contrat XSD.
+    await this.auditService.record({
+      direction: AuditDirection.DOCUMENT_VALIDATED,
+      outcome: AuditOutcome.SUCCESS,
+      operation: SCHEMAS.transferRequest,
+      transactionReference: transaction.reference,
+      correlationId: transaction.correlationId,
+      rawPayload: requestXml,
+    });
 
     try {
       const { amountInWords, exchange } = await this.soapClient.convertAmountToWords(
@@ -279,7 +342,8 @@ export class TransactionsService {
         durationMs: exchange.durationMs,
       });
 
-      return completed;
+      // Scellement : etat terminal atteint, l'empreinte peut etre figee.
+      return await this.anchorService.sealTransaction(completed);
     } catch (error) {
       return this.handleProcessingFailure(transaction, error);
     }
@@ -300,7 +364,7 @@ export class TransactionsService {
       transaction.faultString = error.fault.faultString;
       transaction.failureReason = error.message;
 
-      await this.repository.save(transaction);
+      await this.persistFailedTransaction(transaction);
       await this.auditService.record({
         direction: AuditDirection.INBOUND_FAULT,
         outcome: AuditOutcome.FAULT,
@@ -339,7 +403,7 @@ export class TransactionsService {
       transaction.soapAttempts = error.attempts;
       transaction.failureReason = error.message;
 
-      await this.repository.save(transaction);
+      await this.persistFailedTransaction(transaction);
       await this.auditService.record({
         direction: AuditDirection.COMMUNICATION_ERROR,
         outcome: AuditOutcome.ERROR,
@@ -375,7 +439,7 @@ export class TransactionsService {
       transaction.soapOperation = error.operation;
       transaction.failureReason = error.message;
 
-      await this.repository.save(transaction);
+      await this.persistFailedTransaction(transaction);
       await this.auditService.record({
         direction: AuditDirection.COMMUNICATION_ERROR,
         outcome: AuditOutcome.ERROR,
@@ -403,7 +467,7 @@ export class TransactionsService {
 
     // Erreur non prevue : on marque l'echec sans divulguer le detail technique.
     transaction.failureReason = 'Erreur interne pendant le traitement';
-    await this.repository.save(transaction);
+    await this.persistFailedTransaction(transaction);
 
     this.logger.error({
       event: 'transfer.failed',
@@ -419,5 +483,17 @@ export class TransactionsService {
       message: 'Le traitement du virement a echoue',
       reference: transaction.reference,
     });
+  }
+
+  /**
+   * Persiste un echec puis scelle la transaction.
+   *
+   * Une transaction en echec est scellee au meme titre qu'une reussie : le motif
+   * du rejet fait partie de la piste d'audit, et sa modification ulterieure doit
+   * rester detectable.
+   */
+  private async persistFailedTransaction(transaction: Transaction): Promise<Transaction> {
+    const saved = await this.repository.save(transaction);
+    return this.anchorService.sealTransaction(saved);
   }
 }

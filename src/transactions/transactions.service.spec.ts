@@ -23,6 +23,9 @@ import { TransactionStatus } from './enums/transaction-status.enum';
 import { ReferenceGenerator } from './reference.generator';
 import { TransactionsRepository } from './transactions.repository';
 import { TransactionsService } from './transactions.service';
+import { AnchorService } from '../blockchain/anchor.service';
+import { TransferXmlBuilder } from '../xml/transfer-xml.builder';
+import { XsdValidatorService } from '../xml/xsd-validator.service';
 
 const DEBTOR_IBAN = 'FR7630006000011234567890189';
 const CREDITOR_IBAN = 'DE89370400440532013000';
@@ -57,6 +60,7 @@ describe('TransactionsService', () => {
   let repository: jest.Mocked<TransactionsRepository>;
   let soapClient: jest.Mocked<SoapClientService>;
   let auditService: jest.Mocked<AuditService>;
+  let anchorService: jest.Mocked<AnchorService>;
 
   beforeEach(async () => {
     repository = {
@@ -83,13 +87,24 @@ describe('TransactionsService', () => {
       findByTransactionReference: jest.fn(async () => []),
     } as unknown as jest.Mocked<AuditService>;
 
+    anchorService = {
+      // Par defaut le scellement est transparent : les scenarios metier ne
+      // doivent pas dependre de la blockchain.
+      sealTransaction: jest.fn(async (transaction: Transaction) => transaction),
+    } as unknown as jest.Mocked<AnchorService>;
+
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         TransactionsService,
         ReferenceGenerator,
+        // Serialiseur et validateur reels : le chemin XML -> XSD est ainsi
+        // reellement exerce par les tests du service.
+        TransferXmlBuilder,
+        XsdValidatorService,
         { provide: TransactionsRepository, useValue: repository },
         { provide: SoapClientService, useValue: soapClient },
         { provide: AuditService, useValue: auditService },
+        { provide: AnchorService, useValue: anchorService },
         {
           provide: businessConfig.KEY,
           useValue: { allowedCurrencies: ['EUR', 'USD'], maxAmount: 999_999_999.99 },
@@ -139,12 +154,24 @@ describe('TransactionsService', () => {
       ]);
     });
 
-    it('consigne la requete et la reponse dans la piste d audit', async () => {
+    it('consigne le document canonique, la requete et la reponse dans la piste d audit', async () => {
       await service.initiateTransfer(validDto());
 
-      expect(auditService.record).toHaveBeenCalledTimes(2);
+      expect(auditService.record).toHaveBeenCalledTimes(3);
+
+      // Le document XML valide contre le XSD ouvre la piste : c'est la trace de
+      // ce qui a effectivement franchi le contrat.
       expect(auditService.record).toHaveBeenNthCalledWith(
         1,
+        expect.objectContaining({
+          direction: AuditDirection.DOCUMENT_VALIDATED,
+          outcome: AuditOutcome.SUCCESS,
+          operation: 'transfer-request.xsd',
+          rawPayload: expect.stringContaining('<TransferRequest'),
+        }),
+      );
+      expect(auditService.record).toHaveBeenNthCalledWith(
+        2,
         expect.objectContaining({
           direction: AuditDirection.OUTBOUND_REQUEST,
           outcome: AuditOutcome.SUCCESS,
@@ -152,12 +179,34 @@ describe('TransactionsService', () => {
         }),
       );
       expect(auditService.record).toHaveBeenNthCalledWith(
-        2,
+        3,
         expect.objectContaining({
           direction: AuditDirection.INBOUND_RESPONSE,
           outcome: AuditOutcome.SUCCESS,
           durationMs: 412,
         }),
+      );
+    });
+
+    it('scelle la transaction une fois l etat terminal atteint', async () => {
+      const transaction = await service.initiateTransfer(validDto());
+
+      expect(anchorService.sealTransaction).toHaveBeenCalledTimes(1);
+      expect(anchorService.sealTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({ status: TransactionStatus.COMPLETED }),
+      );
+      expect(transaction.status).toBe(TransactionStatus.COMPLETED);
+    });
+
+    it('scelle aussi une transaction en echec', async () => {
+      soapClient.convertAmountToWords.mockRejectedValue(
+        new SoapCommunicationException('injoignable', 'NumberToDollars', false),
+      );
+
+      await expect(service.initiateTransfer(validDto())).rejects.toThrow();
+
+      expect(anchorService.sealTransaction).toHaveBeenCalledWith(
+        expect.objectContaining({ status: TransactionStatus.FAILED }),
       );
     });
 

@@ -1,5 +1,7 @@
 /** Sens de l'echange consigne dans la piste d'audit. */
 export enum AuditDirection {
+  /** Document metier canonique valide contre son XSD, avant emission. */
+  DOCUMENT_VALIDATED = 'DOCUMENT_VALIDATED',
   /** Requete SOAP emise par l'API vers le fournisseur. */
   OUTBOUND_REQUEST = 'OUTBOUND_REQUEST',
   /** Reponse SOAP nominale recue du fournisseur. */
