@@ -5,6 +5,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { E2E_AUTHORIZATION } from './setup-e2e';
 import { EvmAnchorClient } from '../src/blockchain/evm-anchor.client';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import {
@@ -105,7 +106,10 @@ describe('Transfers (e2e)', () => {
   });
 
   const post = (payload: object, headers: Record<string, string> = {}) => {
-    const req = request(app.getHttpServer()).post('/api/v1/transfers').send(payload);
+    const req = request(app.getHttpServer())
+      .post('/api/v1/transfers')
+      .set('Authorization', E2E_AUTHORIZATION)
+      .send(payload);
     for (const [key, value] of Object.entries(headers)) req.set(key, value);
     return req;
   };
@@ -289,6 +293,7 @@ describe('Transfers (e2e)', () => {
       // La reference retournee dans l'erreur reste interrogeable.
       const lookup = await request(app.getHttpServer())
         .get(`/api/v1/transfers/${failure.body.reference}`)
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       expect(lookup.body.status).toBe(TransactionStatus.FAILED);
@@ -331,6 +336,7 @@ describe('Transfers (e2e)', () => {
 
       const response = await request(app.getHttpServer())
         .get(`/api/v1/transfers/${created.body.reference}`)
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       expect(response.body.reference).toBe(created.body.reference);
@@ -340,6 +346,7 @@ describe('Transfers (e2e)', () => {
     it('retourne 404 pour une reference inconnue', async () => {
       const response = await request(app.getHttpServer())
         .get('/api/v1/transfers/TRF-20260725-ZZZZZZZZ')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(404);
 
       expect(response.body.error).toBe('TRANSACTION_NOT_FOUND');
@@ -348,6 +355,7 @@ describe('Transfers (e2e)', () => {
     it('retourne 400 pour une reference mal formee', async () => {
       const response = await request(app.getHttpServer())
         .get('/api/v1/transfers/pas-une-reference')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(400);
 
       expect(response.body.message.join(' ')).toContain('TRF-YYYYMMDD-XXXXXXXX');
@@ -364,7 +372,10 @@ describe('Transfers (e2e)', () => {
       );
       await post(validPayload({ amount: 99 })).expect(502);
 
-      const all = await request(app.getHttpServer()).get('/api/v1/transfers').expect(200);
+      const all = await request(app.getHttpServer())
+        .get('/api/v1/transfers')
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(200);
       expect(all.body.total).toBe(3);
       expect(all.body.page).toBe(1);
       expect(all.body.limit).toBe(20);
@@ -372,22 +383,30 @@ describe('Transfers (e2e)', () => {
 
       const completed = await request(app.getHttpServer())
         .get('/api/v1/transfers?status=COMPLETED')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
       expect(completed.body.total).toBe(2);
 
       const failed = await request(app.getHttpServer())
         .get('/api/v1/transfers?status=FAILED&limit=1')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
       expect(failed.body.total).toBe(1);
       expect(failed.body.items).toHaveLength(1);
     });
 
     it('refuse un statut inconnu', async () => {
-      await request(app.getHttpServer()).get('/api/v1/transfers?status=INEXISTANT').expect(400);
+      await request(app.getHttpServer())
+        .get('/api/v1/transfers?status=INEXISTANT')
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(400);
     });
 
     it('refuse une taille de page hors bornes', async () => {
-      await request(app.getHttpServer()).get('/api/v1/transfers?limit=500').expect(400);
+      await request(app.getHttpServer())
+        .get('/api/v1/transfers?limit=500')
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(400);
     });
   });
 
@@ -401,6 +420,7 @@ describe('Transfers (e2e)', () => {
 
       const response = await request(app.getHttpServer())
         .get(`/api/v1/transfers/${created.body.reference}/audit`)
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       // La piste s ouvre sur le document canonique valide contre son XSD,
@@ -428,6 +448,7 @@ describe('Transfers (e2e)', () => {
 
       const response = await request(app.getHttpServer())
         .get(`/api/v1/transfers/${created.body.reference}/audit`)
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       const serialized = JSON.stringify(response.body);
@@ -450,6 +471,7 @@ describe('Transfers (e2e)', () => {
 
       const response = await request(app.getHttpServer())
         .get(`/api/v1/transfers/${failure.body.reference}/audit`)
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       expect(response.body).toHaveLength(2);
@@ -464,6 +486,7 @@ describe('Transfers (e2e)', () => {
     it('retourne 404 pour une reference inconnue', async () => {
       await request(app.getHttpServer())
         .get('/api/v1/transfers/TRF-20260725-ZZZZZZZZ/audit')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(404);
     });
   });
@@ -474,7 +497,10 @@ describe('Transfers (e2e)', () => {
 
   describe('GET /api/v1/health', () => {
     it('rapporte l etat des composants', async () => {
-      const response = await request(app.getHttpServer()).get('/api/v1/health').expect(200);
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/health')
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(200);
 
       expect(response.body).toMatchObject({
         status: 'ok',

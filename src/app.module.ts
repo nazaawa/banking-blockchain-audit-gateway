@@ -1,7 +1,9 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { AuditModule } from './audit/audit.module';
+import { AuthModule } from './auth/auth.module';
+import { ApiKeyGuard } from './auth/guards/api-key.guard';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
@@ -26,6 +28,7 @@ import { MobileMoneyModule } from './mobile-money/mobile-money.module';
       validate: validateEnv,
       envFilePath: ['.env.local', '.env'],
     }),
+    AuthModule,
     DatabaseModule,
     SoapModule,
     XmlModule,
@@ -38,6 +41,8 @@ import { MobileMoneyModule } from './mobile-money/mobile-money.module';
     HealthModule,
   ],
   providers: [
+    // Refus par defaut : une route non marquee `@Public()` exige une cle.
+    { provide: APP_GUARD, useClass: ApiKeyGuard },
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
   ],

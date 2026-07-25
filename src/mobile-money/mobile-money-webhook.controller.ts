@@ -1,5 +1,6 @@
 import { Body, Controller, Headers, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiHeader, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Public } from '../auth/decorators/public.decorator';
 import { MobileMoneyResponseDto } from './dto/mobile-money-response.dto';
 import { MobileMoneyWebhookDto } from './dto/mobile-money-webhook.dto';
 import { MobileMoneyWebhookService } from './mobile-money-webhook.service';
@@ -10,6 +11,9 @@ export class MobileMoneyWebhookController {
   constructor(private readonly webhooks: MobileMoneyWebhookService) {}
 
   @Post()
+  // L'agregateur ne detient pas de cle d'API : ce point d'entree porte sa
+  // propre authentification, la signature HMAC verifiee par le service.
+  @Public()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Recevoir une confirmation signee de l agregateur',

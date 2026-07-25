@@ -5,6 +5,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { E2E_AUTHORIZATION } from './setup-e2e';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { AnchorService } from '../src/blockchain/anchor.service';
 import { EvmAnchorClient } from '../src/blockchain/evm-anchor.client';
@@ -153,6 +154,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
   const createTransfer = async (overrides: Record<string, unknown> = {}): Promise<string> => {
     const response = await request(app.getHttpServer())
       .post('/api/v1/transfers')
+      .set('Authorization', E2E_AUTHORIZATION)
       .send(payload(overrides))
       .expect(201);
     return response.body.reference as string;
@@ -161,6 +163,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
   const verify = async (reference: string): Promise<VerificationBody> => {
     const response = await request(app.getHttpServer())
       .get(`/api/v1/transfers/${reference}/verification`)
+      .set('Authorization', E2E_AUTHORIZATION)
       .expect(200);
     const body = asRecord(response.body);
     return { ...body, checks: asRecord(body.checks) };
@@ -209,6 +212,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
 
       const failure = await request(app.getHttpServer())
         .post('/api/v1/transfers')
+        .set('Authorization', E2E_AUTHORIZATION)
         .send(payload())
         .expect(500);
 
@@ -228,6 +232,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
 
       const audit = await request(app.getHttpServer())
         .get(`/api/v1/transfers/${reference}/audit`)
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       const entries: unknown = audit.body;
@@ -257,6 +262,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
 
       const outcome = await request(app.getHttpServer())
         .post('/api/v1/anchors/batches')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       // Le lot couvre desormais les transactions ET les faits du registre : le
@@ -294,6 +300,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
     it('n ancre rien quand la file est vide', async () => {
       const outcome = await request(app.getHttpServer())
         .post('/api/v1/anchors/batches')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       expect(outcome.body).toMatchObject({ anchored: 0, reason: 'NOTHING_TO_ANCHOR' });
@@ -303,10 +310,12 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
       await createTransfer();
       const outcome = await request(app.getHttpServer())
         .post('/api/v1/anchors/batches')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       const batch = await request(app.getHttpServer())
         .get(`/api/v1/anchors/batches/${outcome.body.batchId}`)
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       expect(batch.body).toMatchObject({
@@ -323,6 +332,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
 
       const outcome = await request(app.getHttpServer())
         .post('/api/v1/anchors/batches')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
       expect(outcome.body.anchored).toBe(0);
 
@@ -335,6 +345,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
       chain.available = true;
       const recovery = await request(app.getHttpServer())
         .post('/api/v1/anchors/batches')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
       expect(recovery.body.anchored).toBe(1);
       expect(recovery.body.batchId).toBe(outcome.body.batchId);
@@ -353,6 +364,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         const outcome = await request(app.getHttpServer())
           .post('/api/v1/anchors/batches')
+          .set('Authorization', E2E_AUTHORIZATION)
           .expect(200);
         batchIds.push(outcome.body.batchId as unknown);
       }
@@ -369,6 +381,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
       chain.available = true;
       const afterExhaustion = await request(app.getHttpServer())
         .post('/api/v1/anchors/batches')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
       expect(afterExhaustion.body).toMatchObject({
         anchored: 0,
@@ -562,6 +575,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
     it('retourne 404 pour une reference inconnue', async () => {
       await request(app.getHttpServer())
         .get('/api/v1/transfers/TRF-20260725-ZZZZZZZZ/verification')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(404);
     });
   });
@@ -572,7 +586,10 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
 
   describe('Supervision', () => {
     it('rapporte l etat des schemas XSD et de la blockchain', async () => {
-      const { body } = await request(app.getHttpServer()).get('/api/v1/health').expect(200);
+      const { body } = await request(app.getHttpServer())
+        .get('/api/v1/health')
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(200);
 
       expect(body.components.xsdSchemas.status).toBe('up');
       expect(body.components.blockchain).toMatchObject({ status: 'up', enabled: true });
@@ -585,6 +602,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
 
       const { body } = await request(app.getHttpServer())
         .get('/api/v1/anchors/statistics')
+        .set('Authorization', E2E_AUTHORIZATION)
         .expect(200);
 
       expect(body).toMatchObject({ ANCHORED: 1, PENDING: 1 });

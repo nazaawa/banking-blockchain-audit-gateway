@@ -7,6 +7,8 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { CreateMobileMoneyTransactionDto } from './dto/create-mobile-money-transaction.dto';
+import { RequireScopes } from '../auth/decorators/scopes.decorator';
+import { SCOPES } from '../auth/scopes';
 import { MobileMoneyResponseDto } from './dto/mobile-money-response.dto';
 import { MobileMoneyService } from './mobile-money.service';
 import { ReconciliationService } from './reconciliation.service';
@@ -20,6 +22,7 @@ export class MobileMoneyController {
   ) {}
 
   @Post('transactions')
+  @RequireScopes(SCOPES.transfersWrite)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Initier une transaction Mobile Money',
@@ -38,6 +41,7 @@ export class MobileMoneyController {
   }
 
   @Get('transactions/:reference')
+  @RequireScopes(SCOPES.transfersRead)
   @ApiOperation({ summary: 'Consulter le cycle complet d une transaction Mobile Money' })
   @ApiOkResponse({ type: MobileMoneyResponseDto })
   async findOne(@Param('reference') reference: string): Promise<MobileMoneyResponseDto> {
@@ -45,6 +49,7 @@ export class MobileMoneyController {
   }
 
   @Post('reconciliation/run')
+  @RequireScopes(SCOPES.reconciliationWrite)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Relancer le moteur de rapprochement sur les paiements eligibles' })
   async runReconciliation(): Promise<{

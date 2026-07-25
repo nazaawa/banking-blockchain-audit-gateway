@@ -9,6 +9,7 @@ import {
 import { InjectDataSource } from '@nestjs/typeorm';
 import type { Response } from 'express';
 import { DataSource } from 'typeorm';
+import { Public } from '../auth/decorators/public.decorator';
 import { SoapClientService } from '../soap/soap-client.service';
 import { XsdValidatorService } from '../xml/xsd-validator.service';
 import { EvmAnchorClient } from '../blockchain/evm-anchor.client';
@@ -42,6 +43,8 @@ export class HealthController {
   ) {}
 
   @Get()
+  // Sonde de supervision : aucune donnee metier, doit rester joignable.
+  @Public()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Sonde de sante',

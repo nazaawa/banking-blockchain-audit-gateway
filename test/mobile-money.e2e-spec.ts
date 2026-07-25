@@ -5,6 +5,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { E2E_AUTHORIZATION } from './setup-e2e';
 import { EvmAnchorClient } from '../src/blockchain/evm-anchor.client';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { MobileMoneyWebhookStatus } from '../src/mobile-money/dto/mobile-money-webhook.dto';
@@ -88,6 +89,7 @@ describe('Mobile Money (e2e)', () => {
   async function initiate() {
     return request(app.getHttpServer())
       .post('/api/v1/mobile-money/transactions')
+      .set('Authorization', E2E_AUTHORIZATION)
       .send(payload())
       .expect(201);
   }
@@ -110,6 +112,7 @@ describe('Mobile Money (e2e)', () => {
     const initiated = await initiate();
     const response = await request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${initiated.body.aggregatorReference}/confirm`)
+      .set('Authorization', E2E_AUTHORIZATION)
       .send({})
       .expect(200);
 
@@ -132,6 +135,7 @@ describe('Mobile Money (e2e)', () => {
     const initiated = await initiate();
     const response = await request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${initiated.body.aggregatorReference}/confirm`)
+      .set('Authorization', E2E_AUTHORIZATION)
       .send({ amount: 1250.76 })
       .expect(200);
 
@@ -174,6 +178,7 @@ describe('Mobile Money (e2e)', () => {
     const deliver = () =>
       request(app.getHttpServer())
         .post('/api/v1/webhooks/mobile-money')
+        .set('Authorization', E2E_AUTHORIZATION)
         .set('X-Mobile-Money-Signature', signature)
         .send(event);
 
@@ -186,6 +191,7 @@ describe('Mobile Money (e2e)', () => {
     const initiated = await initiate();
     await request(app.getHttpServer())
       .post('/api/v1/webhooks/mobile-money')
+      .set('Authorization', E2E_AUTHORIZATION)
       .set('X-Mobile-Money-Signature', 'sha256=invalid')
       .send({
         eventId: 'EVT-E2E-INVALID-0001',
@@ -203,6 +209,7 @@ describe('Mobile Money (e2e)', () => {
     const initiated = await initiate();
     const response = await request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${initiated.body.aggregatorReference}/confirm`)
+      .set('Authorization', E2E_AUTHORIZATION)
       .send({ status: MobileMoneyWebhookStatus.FAILED })
       .expect(200);
 

@@ -21,6 +21,8 @@ import {
   ApiTags,
   ApiUnprocessableEntityResponse,
 } from '@nestjs/swagger';
+import { RequireScopes } from '../auth/decorators/scopes.decorator';
+import { SCOPES } from '../auth/scopes';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import type { IntegrityReport } from '../blockchain/integrity-verification.service';
 import { IntegrityVerificationService } from '../blockchain/integrity-verification.service';
@@ -40,6 +42,7 @@ export class TransactionsController {
   ) {}
 
   @Post()
+  @RequireScopes(SCOPES.transfersWrite)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Initier un virement',
@@ -94,6 +97,7 @@ export class TransactionsController {
   }
 
   @Get()
+  @RequireScopes(SCOPES.transfersRead)
   @ApiOperation({
     summary: 'Lister les virements',
     description: 'Liste paginee, du plus recent au plus ancien.',
@@ -104,6 +108,7 @@ export class TransactionsController {
   }
 
   @Get(':reference')
+  @RequireScopes(SCOPES.transfersRead)
   @ApiOperation({ summary: 'Consulter le statut d un virement' })
   @ApiOkResponse({ type: TransferResponseDto })
   @ApiNotFoundResponse({ description: 'Reference inconnue', type: ErrorResponseDto })
@@ -113,6 +118,7 @@ export class TransactionsController {
   }
 
   @Get(':reference/verification')
+  @RequireScopes(SCOPES.transfersRead)
   @ApiOperation({
     summary: 'Verifier l integrite d un virement',
     description: [
@@ -133,6 +139,7 @@ export class TransactionsController {
   }
 
   @Get(':reference/audit')
+  @RequireScopes(SCOPES.transfersRead)
   @ApiOperation({
     summary: 'Consulter la piste d audit d un virement',
     description:

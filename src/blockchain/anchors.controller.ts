@@ -10,6 +10,8 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiNotFoundResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { RequireScopes } from '../auth/decorators/scopes.decorator';
+import { SCOPES } from '../auth/scopes';
 import { ErrorResponseDto } from '../common/dto/error-response.dto';
 import { AnchorService } from './anchor.service';
 import { AnchorBatch } from './entities/anchor-batch.entity';
@@ -20,6 +22,7 @@ export class AnchorsController {
   constructor(private readonly anchorService: AnchorService) {}
 
   @Get('batches')
+  @RequireScopes(SCOPES.anchorsRead)
   @ApiOperation({
     summary: 'Lister les lots d ancrage',
     description:
@@ -32,6 +35,7 @@ export class AnchorsController {
   }
 
   @Get('batches/:id')
+  @RequireScopes(SCOPES.anchorsRead)
   @ApiOperation({ summary: 'Consulter un lot d ancrage' })
   @ApiOkResponse({ type: AnchorBatch })
   @ApiNotFoundResponse({ description: 'Lot inconnu', type: ErrorResponseDto })
@@ -47,6 +51,7 @@ export class AnchorsController {
   }
 
   @Post('batches')
+  @RequireScopes(SCOPES.anchorsWrite)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Declencher un ancrage immediat',
@@ -69,6 +74,7 @@ export class AnchorsController {
   }
 
   @Get('statistics')
+  @RequireScopes(SCOPES.anchorsRead)
   @ApiOperation({ summary: 'Repartition des transactions par etat d ancrage' })
   @ApiOkResponse({ description: 'Nombre de transactions par statut' })
   async statistics(): Promise<Record<string, number>> {

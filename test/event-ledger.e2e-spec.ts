@@ -5,6 +5,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { E2E_AUTHORIZATION } from './setup-e2e';
 import { AnchorService } from '../src/blockchain/anchor.service';
 import { EvmAnchorClient } from '../src/blockchain/evm-anchor.client';
 import type { AnchorReceipt, OnChainBatch } from '../src/blockchain/evm-anchor.client';
@@ -138,6 +139,7 @@ describe('Registre d evenements (e2e)', () => {
   const initiate = async (amount = 1250.75): Promise<{ reference: string; aggregator: string }> => {
     const response = await request(app.getHttpServer())
       .post('/api/v1/mobile-money/transactions')
+      .set('Authorization', E2E_AUTHORIZATION)
       .send({
         operator: 'MPESA',
         payerMsisdn: '+243812345678',
@@ -159,12 +161,14 @@ describe('Registre d evenements (e2e)', () => {
   const confirm = (aggregator: string, amount: number) =>
     request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${aggregator}/confirm`)
+      .set('Authorization', E2E_AUTHORIZATION)
       .send({ amount })
       .expect(200);
 
   const chainOf = async (reference: string): Promise<EventBody[]> => {
     const response = await request(app.getHttpServer())
       .get(`/api/v1/transfers/${reference}/events`)
+      .set('Authorization', E2E_AUTHORIZATION)
       .expect(200);
     return response.body as EventBody[];
   };
@@ -172,6 +176,7 @@ describe('Registre d evenements (e2e)', () => {
   const verifyChain = async (reference: string): Promise<VerificationBody> => {
     const response = await request(app.getHttpServer())
       .get(`/api/v1/transfers/${reference}/events/verification`)
+      .set('Authorization', E2E_AUTHORIZATION)
       .expect(200);
     return response.body as VerificationBody;
   };

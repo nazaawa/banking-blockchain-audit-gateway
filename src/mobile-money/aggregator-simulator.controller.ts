@@ -12,6 +12,8 @@ import {
 import type { ConfigType } from '@nestjs/config';
 import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { mobileMoneyConfig } from '../config/configuration';
+import { RequireScopes } from '../auth/decorators/scopes.decorator';
+import { SCOPES } from '../auth/scopes';
 import { AggregatorSimulatorService } from './aggregator-simulator.service';
 import { MobileMoneyResponseDto } from './dto/mobile-money-response.dto';
 import { SimulateMobileMoneyDto } from './dto/simulate-mobile-money.dto';
@@ -31,6 +33,7 @@ export class AggregatorSimulatorController {
   ) {}
 
   @Get('payments/:aggregatorReference')
+  @RequireScopes(SCOPES.simulatorWrite)
   @ApiOperation({ summary: 'Consulter un paiement dans le simulateur' })
   @ApiOkResponse({ type: MobileMoneyResponseDto })
   async findOne(
@@ -43,6 +46,7 @@ export class AggregatorSimulatorController {
   }
 
   @Post('payments/:aggregatorReference/confirm')
+  @RequireScopes(SCOPES.simulatorWrite)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Simuler un callback operateur',

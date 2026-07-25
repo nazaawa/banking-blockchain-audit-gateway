@@ -1,5 +1,7 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { ApiNotFoundResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { RequireScopes } from '../auth/decorators/scopes.decorator';
+import { SCOPES } from '../auth/scopes';
 import { ErrorResponseDto } from '../common/dto/error-response.dto';
 import { TransferParamsDto } from '../transactions/dto/transfer-params.dto';
 import { TransactionEventResponseDto } from './dto/transaction-event-response.dto';
@@ -16,6 +18,7 @@ export class TransactionEventsController {
   ) {}
 
   @Get()
+  @RequireScopes(SCOPES.transfersRead)
   @ApiOperation({
     summary: 'Consulter le registre des faits',
     description:
@@ -29,6 +32,7 @@ export class TransactionEventsController {
   }
 
   @Get('verification')
+  @RequireScopes(SCOPES.transfersRead)
   @ApiOperation({
     summary: 'Verifier l integrite de la chaine d evenements',
     description: [
