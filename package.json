@@ -1,5 +1,5 @@
 {
-  "name": "banking-integration-blockchain-audit-gateway",
+  "name": "banking-blockchain-audit-gateway",
   "version": "1.0.0",
   "description": "Passerelle bancaire : API REST -> XML canonique valide par XSD -> service SOAP -> PostgreSQL -> preuve d'integrite ancree sur blockchain (Merkle)",
   "author": "",
