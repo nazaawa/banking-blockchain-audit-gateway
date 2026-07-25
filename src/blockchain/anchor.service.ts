@@ -12,6 +12,7 @@ import { AnchorStatus, BatchStatus } from './enums/anchor-status.enum';
 import { EvmAnchorClient } from './evm-anchor.client';
 import { toLeaf } from './fingerprint.util';
 import { buildMerkleTree, getProof } from './merkle.util';
+import { MetricsService } from '../observability/metrics.service';
 
 /** Resultat de la constitution et de l'ancrage d'un lot. */
 export interface BatchOutcome {
@@ -85,6 +86,7 @@ export class AnchorService implements OnModuleInit {
     private readonly dataSource: DataSource,
     private readonly client: EvmAnchorClient,
     private readonly scheduler: SchedulerRegistry,
+    private readonly metrics: MetricsService,
     @Inject(blockchainConfig.KEY)
     private readonly chain: ConfigType<typeof blockchainConfig>,
     @Inject(anchorConfig.KEY)
@@ -433,6 +435,7 @@ export class AnchorService implements OnModuleInit {
       await this.markItems(items, AnchorStatus.ANCHORED, manager);
       return anchored;
     });
+    this.metrics.anchorBatches.inc({ status: 'ANCHORED' });
 
     this.logger.log({
       event: 'anchor.batch.anchored',

@@ -42,6 +42,66 @@ export class HealthController {
     private readonly chain: ConfigType<typeof blockchainConfig>,
   ) {}
 
+  /**
+   * Vivacite : le processus repond-il ?
+   *
+   * Ne consulte **aucune** dependance, deliberement. Un orchestrateur redemarre
+   * le conteneur quand cette sonde echoue : la faire dependre de PostgreSQL ou
+   * de la chaine reviendrait a redemarrer en boucle un service parfaitement
+   * sain parce qu'un tiers est indisponible — et a aggraver la panne, chaque
+   * redemarrage rouvrant des connexions vers un composant deja en difficulte.
+   */
+  @Get('live')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Sonde de vivacite',
+    description:
+      'Repond 200 tant que le processus fonctionne. Ne consulte aucune ' +
+      'dependance : un echec doit signifier « redemarrez-moi », rien d autre.',
+  })
+  live(): { status: 'ok'; uptimeSeconds: number } {
+    return { status: 'ok', uptimeSeconds: Math.round(process.uptime()) };
+  }
+
+  /**
+   * Aptitude : le service peut-il traiter du trafic ?
+   *
+   * PostgreSQL est requis — sans base, aucune requete metier n'aboutit. La
+   * chaine ne l'est **pas** : l'ancrage est asynchrone et rattrapable, un noeud
+   * injoignable degrade la publication sans empecher d'encaisser ni de payer.
+   * Retirer le service du trafic pour cela couperait un systeme qui fonctionne.
+   */
+  @Get('ready')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Sonde d aptitude au trafic',
+    description:
+      'Exige PostgreSQL, le client SOAP et les schemas XSD. La blockchain en ' +
+      'est exclue : son indisponibilite retarde la publication des preuves, ' +
+      'elle n empeche pas de traiter les paiements.',
+  })
+  @ApiServiceUnavailableResponse({ description: 'Une dependance requise est indisponible' })
+  async ready(
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<{ status: 'ok' | 'degraded'; components: Record<string, ComponentStatus> }> {
+    const [database, soapClient] = await Promise.all([
+      this.checkDatabase(),
+      this.checkSoapClient(),
+    ]);
+    const xsdSchemas: ComponentStatus = this.xsdValidator.isReady() ? 'up' : 'down';
+
+    const ready = database.status === 'up' && soapClient.status === 'up' && xsdSchemas === 'up';
+
+    if (!ready) response.status(HttpStatus.SERVICE_UNAVAILABLE);
+
+    return {
+      status: ready ? 'ok' : 'degraded',
+      components: { database: database.status, soapClient: soapClient.status, xsdSchemas },
+    };
+  }
+
   @Get()
   // Sonde de supervision : aucune donnee metier, doit rester joignable.
   @Public()

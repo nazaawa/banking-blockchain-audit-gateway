@@ -27,7 +27,8 @@
     "auth:keygen": "node scripts/generate-api-key.js",
     "contract:compile": "node scripts/compile-contract.js",
     "contract:deploy": "node scripts/deploy-contract.js",
-    "chain:node": "hardhat node --port 8545"
+    "chain:node": "hardhat node --port 8545",
+    "ops:verify-restore": "ts-node -r tsconfig-paths/register scripts/verify-restore.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
@@ -42,6 +43,7 @@
     "ethers": "^6.17.0",
     "helmet": "^8.0.0",
     "pg": "^8.13.1",
+    "prom-client": "^15.1.3",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "soap": "^1.1.5",

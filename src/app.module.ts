@@ -16,6 +16,7 @@ import { XmlModule } from './xml/xml.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { EventsModule } from './events/events.module';
 import { RefundsModule } from './refunds/refunds.module';
+import { ObservabilityModule } from './observability/observability.module';
 import { SecurityModule } from './security/security.module';
 import { AccountingModule } from './accounting/accounting.module';
 import { TreasuryModule } from './treasury/treasury.module';
@@ -32,6 +33,7 @@ import { MobileMoneyModule } from './mobile-money/mobile-money.module';
       validate: validateEnv,
       envFilePath: ['.env.local', '.env'],
     }),
+    ObservabilityModule,
     SecurityModule,
     AuthModule,
     DatabaseModule,
