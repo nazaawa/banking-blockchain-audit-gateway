@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: banking-soap-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-banking}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-banking}
+      POSTGRES_DB: ${DB_NAME:-banking_soap}
+      # Accelere l'initialisation ; la base reste locale au conteneur.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8'
+    ports:
+      - '${DB_PORT:-5432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # L'API ne demarre qu'une fois la base reellement prete a accepter des requetes.
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USERNAME:-banking} -d ${DB_NAME:-banking_soap}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - banking-net
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: banking-soap-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: 3000
+      API_PREFIX: ${API_PREFIX:-api/v1}
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-true}
+      SWAGGER_PATH: ${SWAGGER_PATH:-api/docs}
+
+      # `postgres` est le nom du service : la resolution DNS est assuree par le reseau Compose.
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USERNAME: ${DB_USERNAME:-banking}
+      DB_PASSWORD: ${DB_PASSWORD:-banking}
+      DB_NAME: ${DB_NAME:-banking_soap}
+      DB_SYNCHRONIZE: ${DB_SYNCHRONIZE:-true}
+      DB_LOGGING: ${DB_LOGGING:-false}
+      DB_SSL: 'false'
+
+      SOAP_ENDPOINT: ${SOAP_ENDPOINT:-https://www.dataaccess.com/webservicesserver/NumberConversion.wso}
+      SOAP_WSDL_SOURCE: ${SOAP_WSDL_SOURCE:-local}
+      SOAP_WSDL_URL: ${SOAP_WSDL_URL:-https://www.dataaccess.com/webservicesserver/NumberConversion.wso?WSDL}
+      SOAP_TIMEOUT_MS: ${SOAP_TIMEOUT_MS:-8000}
+      SOAP_MAX_RETRIES: ${SOAP_MAX_RETRIES:-2}
+      SOAP_RETRY_DELAY_MS: ${SOAP_RETRY_DELAY_MS:-300}
+      SOAP_MAX_RESPONSE_BYTES: ${SOAP_MAX_RESPONSE_BYTES:-1048576}
+
+      ALLOWED_CURRENCIES: ${ALLOWED_CURRENCIES:-EUR,USD,GBP,CHF,XOF,XAF,CDF}
+      TRANSFER_MAX_AMOUNT: ${TRANSFER_MAX_AMOUNT:-999999999.99}
+
+      LOG_LEVEL: ${LOG_LEVEL:-log}
+      AUDIT_MAX_PAYLOAD_CHARS: ${AUDIT_MAX_PAYLOAD_CHARS:-8000}
+      AUDIT_PERSIST_PAYLOADS: ${AUDIT_PERSIST_PAYLOADS:-true}
+    ports:
+      - '${PORT:-3000}:3000'
+    networks:
+      - banking-net
+
+volumes:
+  postgres-data:
+    driver: local
+
+networks:
+  banking-net:
+    driver: bridge
