@@ -386,13 +386,20 @@ describe('Transfers (e2e)', () => {
         .get(`/api/v1/transfers/${created.body.reference}/audit`)
         .expect(200);
 
-      expect(response.body).toHaveLength(2);
+      // La piste s ouvre sur le document canonique valide contre son XSD,
+      // puis retrace l aller-retour SOAP.
+      expect(response.body).toHaveLength(3);
       expect(response.body[0]).toMatchObject({
+        direction: 'DOCUMENT_VALIDATED',
+        outcome: 'SUCCESS',
+        operation: 'transfer-request.xsd',
+      });
+      expect(response.body[1]).toMatchObject({
         direction: 'OUTBOUND_REQUEST',
         outcome: 'SUCCESS',
         operation: 'NumberToDollars',
       });
-      expect(response.body[1]).toMatchObject({
+      expect(response.body[2]).toMatchObject({
         direction: 'INBOUND_RESPONSE',
         outcome: 'SUCCESS',
         durationMs: 412,
@@ -428,8 +435,9 @@ describe('Transfers (e2e)', () => {
         .get(`/api/v1/transfers/${failure.body.reference}/audit`)
         .expect(200);
 
-      expect(response.body).toHaveLength(1);
-      expect(response.body[0]).toMatchObject({
+      expect(response.body).toHaveLength(2);
+      expect(response.body[0]).toMatchObject({ direction: 'DOCUMENT_VALIDATED' });
+      expect(response.body[1]).toMatchObject({
         direction: 'INBOUND_FAULT',
         outcome: 'FAULT',
         faultCode: 'soap:Server',
