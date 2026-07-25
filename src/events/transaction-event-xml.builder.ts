@@ -10,7 +10,7 @@ export const EVENT_NAMESPACE = 'urn:banking:event:1.0';
  * evolueront a des rythmes differents, et melanger leurs versions rendrait la
  * verification d'archives ambigue.
  */
-export const EVENT_RECORD_FORMAT_VERSION = '1.0';
+export const EVENT_RECORD_FORMAT_VERSION = '2.0';
 
 const INDENT = '  ';
 
@@ -26,7 +26,7 @@ export type SerializableEvent = Omit<
   | 'leafIndex'
   | 'merkleProof'
   | 'createdAt'
-> & { id: string };
+> & { id: string; recordFormatVersion?: string };
 
 /**
  * Serialise un fait metier en document canonique.
@@ -41,7 +41,9 @@ export class TransactionEventXmlBuilder {
   build(event: SerializableEvent): string {
     const lines = [
       '<?xml version="1.0" encoding="UTF-8"?>',
-      `<TransactionEvent xmlns="${EVENT_NAMESPACE}" version="${EVENT_RECORD_FORMAT_VERSION}">`,
+      `<TransactionEvent xmlns="${EVENT_NAMESPACE}" version="${
+        event.recordFormatVersion ?? EVENT_RECORD_FORMAT_VERSION
+      }">`,
       this.element('eventId', event.id, 1),
       this.element('eventType', event.eventType, 1),
       this.element('sequence', String(event.sequence), 1),
@@ -86,6 +88,19 @@ export class TransactionEventXmlBuilder {
             this.element('chainHead', event.closureChainHead, 2),
             `${INDENT}</closure>`,
           ]
+        : []),
+      // Bloc present sur le seul evenement d'ouverture.
+      ...(event.debtorIban && event.creditorIban
+        ? [
+            `${INDENT}<parties>`,
+            this.element('debtorIban', event.debtorIban, 2),
+            this.optionalElement('debtorName', event.debtorName, 2),
+            this.element('creditorIban', event.creditorIban, 2),
+            this.element('creditorName', event.creditorName ?? '', 2),
+            this.optionalElement('endToEndLabel', event.endToEndLabel, 2),
+          ]
+            .filter((line): line is string => line !== null)
+            .concat(`${INDENT}</parties>`)
         : []),
       '</TransactionEvent>',
     ];

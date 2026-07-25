@@ -7,6 +7,7 @@ import {
   JoinColumn,
   ManyToOne,
   PrimaryGeneratedColumn,
+  Check,
   Unique,
 } from 'typeorm';
 import { AnchorBatch } from '../../blockchain/entities/anchor-batch.entity';
@@ -47,6 +48,19 @@ const numericTransformer = {
  * lot Merkle reste valide : les deux mecanismes prouvent des choses
  * differentes — l'inclusion pour l'un, l'ordre pour l'autre.
  */
+/**
+ * Contrainte declaree ici et non seulement en migration : `synchronize`
+ * l'effacerait sinon, et l'invariant ne tiendrait que sur les bases provisionnees
+ * par migrations.
+ */
+@Check(
+  'CHK_transaction_events_closure',
+  `("event_type" = 'CASE_CLOSED' AND "closure_event_count" > 1 AND "closure_chain_head" ~ '^0x[0-9a-fA-F]{64}$') OR ("event_type" <> 'CASE_CLOSED' AND "closure_event_count" IS NULL AND "closure_chain_head" IS NULL)`,
+)
+@Check(
+  'CHK_transaction_events_parties',
+  `("event_type" IN ('TRANSFER_INITIATED', 'PAYMENT_INITIATED') AND (("record_format_version" = '1.0' AND "debtor_iban" IS NULL AND "debtor_name" IS NULL AND "creditor_iban" IS NULL AND "creditor_name" IS NULL AND "end_to_end_label" IS NULL) OR ("debtor_iban" IS NOT NULL AND "creditor_iban" IS NOT NULL AND "creditor_name" IS NOT NULL))) OR ("event_type" NOT IN ('TRANSFER_INITIATED', 'PAYMENT_INITIATED') AND "debtor_iban" IS NULL AND "debtor_name" IS NULL AND "creditor_iban" IS NULL AND "creditor_name" IS NULL AND "end_to_end_label" IS NULL)`,
+)
 @Entity('transaction_events')
 @Unique('uq_transaction_events_sequence', ['transactionReference', 'sequence'])
 @Index('idx_transaction_events_reference', ['transactionReference'])
@@ -187,6 +201,32 @@ export class TransactionEvent {
   @ApiPropertyOptional()
   @Column({ name: 'closure_chain_head', type: 'varchar', length: 66, nullable: true })
   closureChainHead!: string | null;
+
+  // --- Parties (evenement d'ouverture uniquement) -----------------------------
+  //
+  // Consignees dans le registre depuis qu'il remplace le scellement
+  // d'instantane : sans elles, une modification d'IBAN beneficiaire en base
+  // resterait indetectable.
+
+  @ApiPropertyOptional()
+  @Column({ name: 'debtor_iban', type: 'varchar', length: 34, nullable: true })
+  debtorIban!: string | null;
+
+  @ApiPropertyOptional()
+  @Column({ name: 'debtor_name', type: 'varchar', length: 140, nullable: true })
+  debtorName!: string | null;
+
+  @ApiPropertyOptional()
+  @Column({ name: 'creditor_iban', type: 'varchar', length: 34, nullable: true })
+  creditorIban!: string | null;
+
+  @ApiPropertyOptional()
+  @Column({ name: 'creditor_name', type: 'varchar', length: 140, nullable: true })
+  creditorName!: string | null;
+
+  @ApiPropertyOptional()
+  @Column({ name: 'end_to_end_label', type: 'varchar', length: 140, nullable: true })
+  endToEndLabel!: string | null;
 
   @ApiProperty({ description: 'Empreinte scellee, calculee avant insertion' })
   @Column({ type: 'varchar', length: 66 })

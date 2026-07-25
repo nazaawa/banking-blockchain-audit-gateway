@@ -20,6 +20,18 @@ const PG_UNIQUE_VIOLATION = '23505';
 /** Tentatives d'insertion en cas de collision de rang sur une meme transaction. */
 const MAX_SEQUENCE_ATTEMPTS = 5;
 
+/**
+ * Evenements portant les parties du virement.
+ *
+ * Consignees une seule fois, a l'ouverture : elles ne changent pas, et les
+ * repeter a chaque fait alourdirait la chaine sans rien prouver de plus. C'est
+ * contre cet enregistrement que la verification confronte la ligne courante.
+ */
+const OPENING_EVENTS: ReadonlySet<TransactionEventType> = new Set([
+  TransactionEventType.TRANSFER_INITIATED,
+  TransactionEventType.PAYMENT_INITIATED,
+]);
+
 /** Fait a consigner. L'appelant decrit ce qui s'est produit, pas comment le prouver. */
 export interface RecordEventInput {
   type: TransactionEventType;
@@ -80,6 +92,7 @@ export class TransactionEventsService {
         order: { sequence: 'DESC' },
       });
       const isClosing = input.type === TransactionEventType.CASE_CLOSED;
+      const isOpening = OPENING_EVENTS.has(input.type);
 
       const draft: SerializableEvent = {
         id: randomUUID(),
@@ -106,6 +119,16 @@ export class TransactionEventsService {
         // valeurs avec le nouveau sommet au lieu de sceller une synthese perimee.
         closureEventCount: isClosing ? (previous?.sequence ?? 0) + 1 : null,
         closureChainHead: isClosing ? (previous?.fingerprint ?? null) : null,
+
+        // Parties consignees a la seule ouverture : elles ne changent pas, et les
+        // repeter a chaque fait alourdirait la chaine sans rien prouver de plus.
+        // C'est cet enregistrement que la verification confronte a la ligne
+        // courante — sans lui, une modification d'IBAN resterait indetectable.
+        debtorIban: isOpening ? transaction.debtorIban : null,
+        debtorName: isOpening ? transaction.debtorName : null,
+        creditorIban: isOpening ? transaction.creditorIban : null,
+        creditorName: isOpening ? transaction.creditorName : null,
+        endToEndLabel: isOpening ? transaction.endToEndLabel : null,
       };
 
       const xml = this.xmlBuilder.build(draft);
