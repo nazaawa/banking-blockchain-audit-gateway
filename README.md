@@ -78,7 +78,7 @@ Le flux de virement classique (`POST /transfers`) suit le même modèle en une s
 | Blockchain       | Chaîne EVM locale (Anvil / nœud Hardhat) + contrat Solidity |
 | Client chaîne    | `ethers` v6                                                 |
 | Documentation    | Swagger / OpenAPI 3                                         |
-| Tests            | Jest + Supertest — **334 tests**                            |
+| Tests            | Jest + Supertest — **370 tests**                            |
 | Conteneurisation | Docker multi-stage + Docker Compose                         |
 
 `xmllint-wasm` a été retenu plutôt que `libxmljs` (compilation native) ou `xsd-schema-validator`
@@ -96,7 +96,7 @@ cp .env.example .env
 
 # Génère le secret à transmettre à l'appelant et l'empreinte à placer dans API_KEYS
 npm run auth:keygen -- local \
-  transfers:read,transfers:write,refunds:write,reconciliation:write,anchors:read,anchors:write,simulator:write
+  transfers:read,transfers:write,refunds:write,reconciliation:write,ledger:read,treasury:write,anchors:read,anchors:write,simulator:write
 
 docker compose up --build
 ```
@@ -122,7 +122,7 @@ cp .env.example .env
 
 # Reporter l'entrée générée dans API_KEYS et conserver le secret affiché
 npm run auth:keygen -- local \
-  transfers:read,transfers:write,refunds:write,reconciliation:write,anchors:read,anchors:write,simulator:write
+  transfers:read,transfers:write,refunds:write,reconciliation:write,ledger:read,treasury:write,anchors:read,anchors:write,simulator:write
 
 # 1. Chaîne EVM locale
 npm run chain:node
@@ -157,7 +157,8 @@ Authorization: Bearer <keyId>.<secret>
 ```
 
 Les droits sont indépendants : `transfers:read`, `transfers:write`, `refunds:write`,
-`reconciliation:write`, `anchors:read`, `anchors:write` et `simulator:write`.
+`reconciliation:write`, `ledger:read`, `treasury:write`, `anchors:read`, `anchors:write` et
+`simulator:write`.
 `AUTH_ENABLED=false` est réservé au développement et bloque le démarrage en production.
 
 ---
@@ -340,6 +341,30 @@ Le registre remplace cet instantané. La table `transaction_events` est **append
 la base** : un déclencheur PostgreSQL rejette tout `UPDATE` touchant autre chose que les colonnes
 d'ancrage, et tout `DELETE`. Le déclencheur est réinstallé au démarrage, de sorte qu'un schéma
 recréé par `synchronize` en développement ne perde pas la garantie silencieusement.
+
+#### L'écriture métier et sa consignation sont indissociables
+
+Un fait n'est pas un journal écrit après coup : il est produit **dans la même transaction SQL** que
+le changement d'état qu'il atteste. Il n'existe donc aucun instant où une ligne aurait avancé sans
+son témoin.
+
+Cette propriété est moins évidente qu'elle n'en a l'air. Écrire les deux séparément — l'état, puis
+le fait — laisse une fenêtre où un incident produit un dossier dont l'état n'est justifié par rien.
+Or la vérification ne peut pas distinguer ce cas d'une suppression malveillante : elle rendrait un
+verdict `TAMPERED` sur un système parfaitement honnête. **Un audit qui accuse à tort en cas de
+panne perd ce qu'il prétend garantir.**
+
+Deux points d'implémentation en découlent :
+
+- **Point de sauvegarde par tentative.** PostgreSQL avorte toute la transaction sur une violation de
+  contrainte. Or la gestion des collisions de rang repose précisément sur une violation rattrapée :
+  sans `SAVEPOINT`, la première collision détruirait la transaction métier englobante.
+- **La clôture lit par le même manager.** Elle scelle le nombre total de faits ; lue de l'extérieur
+  de la transaction, elle ne verrait pas ceux qui viennent d'y être ajoutés et scellerait un total
+  faux.
+
+Les appels externes — SOAP, fournisseur de remboursement — restent **hors** de ces transactions :
+aucun verrou n'est tenu pendant un appel réseau.
 
 #### Trois propriétés indépendantes, et il faut les trois
 
@@ -527,6 +552,39 @@ paiement fournisseur reste `COMPLETED` — l'argent a bien été collecté — p
 est `BLOCKED`, le rapprochement `AMOUNT_MISMATCH`, le dossier `MANUAL_REVIEW` et le remboursement
 `REQUIRED`. Un statut unique aurait forcé à écraser un fait vrai par un autre.
 
+#### La machine à états
+
+Cette indépendance a un revers : l'espace produit compte plusieurs milliers de combinaisons, dont
+l'immense majorité ne correspond à rien. Deux mécanismes l'encadrent, et il faut les deux.
+
+**Les tables de transitions** (`src/transactions/state/`) fixent, dimension par dimension, ce qui
+peut suivre quoi. Les valeurs terminales ne bougent plus : un encaissement constaté ne se dément
+pas, une instruction bancaire bloquée ne se reprend pas.
+
+**Les invariants** ferment ce qu'une table seule laisserait passer, faute de voir plus d'une
+dimension à la fois :
+
+| Invariant                             | Ce qu'il interdit                                       |
+| ------------------------------------- | ------------------------------------------------------- |
+| `bank-requires-provider-confirmation` | Instruire la banque sans encaissement confirmé          |
+| `refund-requires-collection`          | Rembourser ce qui n'a pas été encaissé                  |
+| `resolved-case-requires-extinct-debt` | Résoudre un dossier dette pendante                      |
+| `matched-requires-both-legs-done`     | Un rapprochement conforme dont une jambe n'a pas abouti |
+| `blocked-bank-implies-declared-gap`   | Un blocage bancaire sans écart nommé                    |
+
+Le contrôle s'exécute **dans** la transaction : une transition refusée annule l'écriture au lieu de
+la constater. C'est déterminant ici — le registre étant append-only, un état impossible consigné est
+scellé puis publié, et ne se corrige plus. La machine est le dernier endroit où l'erreur peut encore
+être arrêtée.
+
+**Les cinq invariants sont aussi des contraintes `CHECK`**, déclarées sur l'entité _et_ en migration.
+La machine arrête l'erreur au plus près de sa cause et la nomme ; la base ferme ce qui la contourne —
+script d'exploitation, correctif manuel, futur service. Vérifié en SQL direct.
+
+La table de transitions, elle, reste applicative : une contrainte `CHECK` ne voit que la ligne
+d'arrivée, jamais l'état d'où elle vient. La répliquer demanderait un déclencheur comparant `OLD` et
+`NEW`, comme le garde append-only.
+
 **`transaction_events`** — registre append-only : rang unique par transaction, type, références
 interne / fournisseur / bancaire, les cinq statuts, montants attendu et observé, corrélation,
 empreinte salée, empreinte du fait précédent, parties de l'ouverture, preuve de clôture
@@ -547,12 +605,115 @@ manquant creuserait un trou dans la chaîne, aussi son échec est-il propagé.
 **`anchor_batches`** — statut, racine de Merkle, nombre de feuilles, `chain_id`, adresse du contrat,
 `tx_hash`, numéro de bloc, gaz consommé, tentatives, dernière erreur.
 
+**`journal_entries` / `journal_lines`** — comptabilité en partie double. Chaque écriture référence
+le fait dont elle découle (`event_id`, **unique**), et porte des lignes `(compte, sens, montant)`.
+Append-only, et équilibre imposé par déclencheur.
+
 **`mobile_money_webhook_events`** — déduplication par `eventId`, avec reprise des prises périmées.
 
 > **Résidu assumé.** La table `transactions` conserve les colonnes de l'ancien scellement
 > (`fingerprint`, `fingerprint_salt`, `sealed_at`, `merkle_proof`…). Elles ne sont plus alimentées,
 > mais elles portent des preuves déjà publiées sur la chaîne : les supprimer irait contre l'objet
 > même de ce projet.
+
+## Comptabilité en partie double
+
+Le modèle à cinq statuts dit **qu'une** dette existe ; il ne dit pas **combien**. Sur un écart de
+montant, `refund_status = REQUIRED` ne portait aucune somme : le montant dû n'était déductible que
+par recoupement, et un remboursement partiel laissait un reliquat parfaitement invisible.
+
+Le ledger rend cette dette chiffrée, opposable et **vérifiable** : la somme des débits égale celle
+des crédits, ou la base refuse l'écriture.
+
+### Le plan de comptes
+
+| Compte | Nature | Ce qu'il représente |
+| --- | --- | --- |
+| `PROVIDER_FLOAT` | actif | Fonds encaissés et détenus chez l'agrégateur |
+| `SETTLEMENT` | actif | Compte bancaire de la passerelle |
+| `CREDITOR_PAYABLE` | passif | Dû au bénéficiaire tant que la banque n'a pas exécuté |
+| `PAYER_PAYABLE` | passif | Dû au payeur — dette née d'un écart ou d'un échec |
+| `FEE_REVENUE` | produit | Commission retenue sur un service effectivement rendu |
+
+**Le virement classique n'y figure pas.** Il instruit la banque sans jamais détenir de fonds : lui
+inventer une existence comptable serait faux. Un test le verrouille.
+
+### Les écritures
+
+```
+PROVIDER_CONFIRMED 1250.75          AMOUNT_MISMATCH_DETECTED (1200 encaissés ≠ 1250.75 commandés)
+  D  provider_float    1250.75        D  provider_float    1200.00
+  C  creditor_payable  1232.99        C  payer_payable     1200.00
+  C  fee_revenue         18.76      → aucune commission : aucun service rendu
+
+SETTLEMENT_SWEPT                    BANK_PROCESSING_FAILED
+  D  settlement        1250.75        D  creditor_payable  1232.99
+  C  provider_float    1250.75        D  fee_revenue         18.76
+                                      C  payer_payable     1250.75
+BANK_PROCESSING_COMPLETED           → la commission est contre-passée : facturer un
+  D  creditor_payable  1232.99        échec serait indéfendable
+  C  settlement        1232.99
+                                    REFUND_COMPLETED
+                                      D  payer_payable     1200.00
+                                      C  provider_float    1200.00
+```
+
+Les faits absents de cette table n'ont **aucun** effet comptable : ils décrivent un changement
+d'état, pas un mouvement de fonds. Un rapprochement conforme constate que les deux jambes
+concordent — il ne déplace rien.
+
+### La commission
+
+Le montant est **figé sur la transaction à la confirmation**, jamais recalculé. Le taux
+(`MOBILE_MONEY_FEE_RATE`, 1,5 % par défaut) est une donnée de configuration : le recalculer à la
+lecture ferait varier rétroactivement des écritures déjà passées.
+
+### Le rapatriement des fonds
+
+L'agrégateur ne notifie pas ses reversements — il les exécute selon son propre calendrier. Le
+déduire d'un autre fait reviendrait à inventer une observation. Le rapatriement est donc une
+**opération d'exploitation explicite** (`POST /treasury/sweeps`), consignée au registre comme
+n'importe quel autre fait : scellée, chaînée, ancrable.
+
+Ne sont rapatriés que les dossiers **soldés** — rapprochement conforme, aucun remboursement dû. Les
+fonds d'un litige restent chez l'agrégateur, là où le remboursement sera exécuté.
+
+Son idempotence se lit dans le registre lui-même : une transaction déjà porteuse d'un
+`SETTLEMENT_SWEPT` est écartée. Aucun état supplémentaire n'a besoin d'être maintenu. Deux
+balayages concurrents sont départagés par un verrou et une relecture, ce qui les réduit à un seul
+fait comptable.
+
+### Deux garanties imposées par la base
+
+**Équilibre.** Un déclencheur `CONSTRAINT ... DEFERRABLE` vérifie au commit que débits et crédits
+s'égalent. Il est posé sur les deux tables : sur les seules écritures, une ligne ajoutée après coup
+ne toucherait pas l'en-tête et ne déclencherait donc rien — l'équilibre ne serait garanti qu'à la
+pose initiale, c'est-à-dire pas garanti.
+
+**Immuabilité.** Écritures et lignes sont append-only. Une erreur comptable se corrige par
+contre-passation, jamais par réécriture : c'est la règle qui rend un journal opposable.
+
+Le texte SQL de ces garanties est défini **en un seul endroit**, partagé par la migration et
+l'installateur de démarrage. Ce projet a déjà payé le prix d'une duplication de ce type.
+
+### Consulter
+
+```bash
+curl -H 'Authorization: Bearer <keyId>.<secret>' \
+  'http://localhost:3000/api/v1/ledger/balance?reference=TRF-20260725-C5WMM0G1'
+```
+
+| Méthode | Route | Rôle |
+| ------- | ----- | ---- |
+| `GET` | `/ledger/balance` | Soldes par compte ; `difference` doit valoir zéro |
+| `GET` | `/ledger/transfers/{ref}/entries` | Écritures d'une transaction, avec leurs lignes |
+| `POST` | `/treasury/sweeps` | Rapatriement — idempotent |
+
+Une balance **globale** portant sur plusieurs devises est refusée (`400`) plutôt que sommée :
+additionner des montants incompatibles produirait un total qui ne veut rien dire. Le paramètre
+`currency` lève l'ambiguïté.
+
+---
 
 ### Contrats XSD
 
@@ -567,12 +728,12 @@ La clé de contrôle MOD 97-10 n'étant pas exprimable en XSD 1.0, elle reste v�
 
 ### Migrations
 
-Neuf migrations, rejouables depuis une base vide, `schema:log` propre à l'arrivée :
+Onze migrations, rejouables depuis une base vide, `schema:log` propre à l'arrivée :
 
 ```
 InitialSchema · AddBlockchainAudit · AddMobileMoneyFlow · SplitPaymentStatuses
 AddTransactionEvents · AddRefunds · RefundReopenAndIntegrity · AddClosureProof
-LedgerReplacesSnapshot
+LedgerReplacesSnapshot · AddStateInvariants · AddDoubleEntryLedger
 ```
 
 ---
@@ -580,8 +741,8 @@ LedgerReplacesSnapshot
 ## Tests
 
 ```bash
-npm test          # 216 tests unitaires
-npm run test:e2e  # 118 tests d'intégration (PostgreSQL requis, exécution sérielle)
+npm test          # 237 tests unitaires
+npm run test:e2e  # 133 tests d'intégration (PostgreSQL requis, exécution sérielle)
 npm run test:cov  # couverture
 ```
 
@@ -600,6 +761,11 @@ Couverture notable :
   étrangère, racine falsifiée, déterminisme, propriété des paires triées ;
 - **Registre** — unicité des sels, chaînage, collision de rang concurrente, rangs continus,
   protection append-only imposée par la base ;
+- **Machine à états** — chemins réels du flux acceptés, retours en arrière et états impossibles
+  refusés, diagnostic complet plutôt que première violation ;
+- **Atomicité** — la consignation est mise en échec délibérément, et l'écriture métier doit avoir
+  disparu. Éprouvé en rétablissant l'écriture dédoublée d'origine : le test échoue alors, ce qui
+  établit qu'il porte bien sur la propriété et non sur son apparence ;
 - **Canonicité** — indépendance vis-à-vis de l'ordre de construction de l'objet, injection XML ;
 - **Intégrité** — 6 champs falsifiés indépendamment, troncature de queue, rupture de chaîne,
   clôture absente, attaque à deux volets (ligne + fait consigné) ;
@@ -623,7 +789,11 @@ Couverture notable :
    produire la même chaîne à signer ;
 8. un webhook en erreur restait bloqué en `PROCESSING` ; ajout d'une reprise des prises périmées ;
 9. les IBAN consignés par le registre transitaient **en clair** sur `GET /events`, la vue publique
-   n'omettant que le sel. Masqués, et couverts par un test qui inspecte le corps entier.
+   n'omettant que le sel. Masqués, et couverts par un test qui inspecte le corps entier ;
+10. **écriture dédoublée** sur 17 sites : l'état métier était commité avant que le fait le soit. Un
+    incident entre les deux laissait un dossier que la vérification déclarait `TAMPERED` à tort. Le
+    cas le plus grave était la confirmation Mobile Money : la jambe bancaire restait prise sans fait
+    correspondant, et le webhook ne pouvait plus jamais être rejoué — paiement bloqué définitivement.
 
 ---
 
@@ -644,6 +814,8 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 | Virement abouti, registre complet               | 3 faits chaînés, 1 clôture ancrée, `VERIFIED`                                                     |
 | IBAN bénéficiaire falsifié en base              | `TAMPERED`, champ divergent nommé dans le rapport                                                 |
 | `UPDATE` sur un fait consigné                   | Rejeté par le déclencheur — `append-only`                                                         |
+| État impossible écrit en SQL direct             | Rejeté par les contraintes `CHECK` (3 cas éprouvés)                                               |
+| Consignation en échec pendant une écriture      | Écriture métier annulée ; aucun dossier orphelin, rejeu possible                                  |
 | Fuite d'IBAN (logs + audit + API)               | Aucune                                                                                            |
 
 ---
@@ -655,6 +827,7 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 ├── scripts/                        # Compilation (solc) et déploiement (ethers)
 ├── src/
 │   ├── transactions/               # Virement classique — orchestration
+│   │   └── state/                  #   machine à états : transitions + invariants
 │   ├── mobile-money/               # Collecte, webhook signé, rapprochement
 │   ├── refunds/                    # Remboursement idempotent avec reprise
 │   │   ├── provider-refund.port.ts #   port fournisseur (adaptateur simulé)
