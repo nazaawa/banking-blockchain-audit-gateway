@@ -11,7 +11,9 @@ import { MobileMoneyWebhookStatus } from '../src/mobile-money/dto/mobile-money-w
 import { MobileMoneyWebhookService } from '../src/mobile-money/mobile-money-webhook.service';
 import {
   BankProcessingStatus,
-  MobileMoneyStatus,
+  ProviderStatus,
+  RefundStatus,
+  CaseStatus,
   ReconciliationStatus,
 } from '../src/mobile-money/enums/mobile-money.enum';
 import { SoapClientService } from '../src/soap/soap-client.service';
@@ -79,7 +81,7 @@ describe('Mobile Money (e2e)', () => {
     convertAmountToWords.mockReset();
     convertAmountToWords.mockResolvedValue(soapSuccess());
     await dataSource.query(
-      'TRUNCATE TABLE mobile_money_webhook_events, audit_logs, transactions, anchor_batches RESTART IDENTITY CASCADE',
+      'TRUNCATE TABLE transaction_events, mobile_money_webhook_events, audit_logs, transactions, anchor_batches RESTART IDENTITY CASCADE',
     );
   });
 
@@ -95,7 +97,7 @@ describe('Mobile Money (e2e)', () => {
 
     expect(response.body).toMatchObject({
       status: 'PENDING',
-      mobileMoneyStatus: MobileMoneyStatus.PENDING,
+      providerStatus: ProviderStatus.PENDING,
       bankStatus: BankProcessingStatus.NOT_STARTED,
       reconciliationStatus: ReconciliationStatus.PENDING,
       payerMsisdnMasked: '+24****78',
@@ -113,7 +115,7 @@ describe('Mobile Money (e2e)', () => {
 
     expect(response.body).toMatchObject({
       status: 'COMPLETED',
-      mobileMoneyStatus: MobileMoneyStatus.CONFIRMED,
+      providerStatus: ProviderStatus.CONFIRMED,
       bankStatus: BankProcessingStatus.COMPLETED,
       reconciliationStatus: ReconciliationStatus.MATCHED,
     });
@@ -126,19 +128,35 @@ describe('Mobile Money (e2e)', () => {
     expect(stored.fingerprint).toMatch(/^0x[0-9a-f]{64}$/);
   });
 
-  it('conserve un ecart non scelle pour investigation', async () => {
+  it('scelle un ecart et n instruit jamais la banque', async () => {
     const initiated = await initiate();
     const response = await request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${initiated.body.aggregatorReference}/confirm`)
       .send({ amount: 1250.76 })
       .expect(200);
 
-    expect(response.body.reconciliationStatus).toBe(ReconciliationStatus.MISMATCH);
-    const [stored] = await dataSource.query<Array<{ fingerprint: string | null }>>(
-      'SELECT fingerprint FROM transactions WHERE reference = $1',
-      [initiated.body.reference],
-    );
-    expect(stored.fingerprint).toBeNull();
+    // Les cinq dimensions decrivent desormais la situation reelle : le payeur a
+    // ete debite, la banque n'a pas ete instruite, une dette est nee.
+    expect(response.body).toMatchObject({
+      providerStatus: ProviderStatus.CONFIRMED,
+      bankStatus: BankProcessingStatus.BLOCKED,
+      reconciliationStatus: ReconciliationStatus.AMOUNT_MISMATCH,
+      refundStatus: RefundStatus.REQUIRED,
+      caseStatus: CaseStatus.MANUAL_REVIEW,
+    });
+
+    const [stored] = await dataSource.query<
+      Array<{ fingerprint: string | null; bank_status: string; refund_status: string }>
+    >('SELECT fingerprint, bank_status, refund_status FROM transactions WHERE reference = $1', [
+      initiated.body.reference,
+    ]);
+
+    // Le litige est desormais ancrable : c'est le dossier qui a le plus besoin
+    // d'une preuve opposable.
+    expect(stored.fingerprint).not.toBeNull();
+    // Et la jambe bancaire n'est jamais partie sur un montant non confirme.
+    expect(stored.bank_status).toBe(BankProcessingStatus.BLOCKED);
+    expect(stored.refund_status).toBe(RefundStatus.REQUIRED);
   });
 
   it('deduplique une relivraison du meme evenement', async () => {
@@ -188,8 +206,13 @@ describe('Mobile Money (e2e)', () => {
       .send({ status: MobileMoneyWebhookStatus.FAILED })
       .expect(200);
 
-    expect(response.body.mobileMoneyStatus).toBe(MobileMoneyStatus.FAILED);
-    expect(response.body.reconciliationStatus).toBe(ReconciliationStatus.MANUAL_REVIEW);
+    // Rien n'a ete encaisse : echec propre, sans dette ni dossier a instruire.
+    expect(response.body).toMatchObject({
+      providerStatus: ProviderStatus.FAILED,
+      reconciliationStatus: ReconciliationStatus.NOT_APPLICABLE,
+      refundStatus: RefundStatus.NOT_REQUIRED,
+      caseStatus: CaseStatus.NONE,
+    });
     expect(convertAmountToWords).not.toHaveBeenCalled();
   });
 });

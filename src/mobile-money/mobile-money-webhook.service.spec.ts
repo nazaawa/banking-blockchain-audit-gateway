@@ -1,4 +1,5 @@
 import type { Repository, UpdateResult } from 'typeorm';
+import { AnchorService } from '../blockchain/anchor.service';
 import { AuditService } from '../audit/audit.service';
 import { SoapClientService } from '../soap/soap-client.service';
 import type { AmountInWordsResult } from '../soap/soap.types';
@@ -8,13 +9,14 @@ import { MobileMoneyWebhookDto, MobileMoneyWebhookStatus } from './dto/mobile-mo
 import { MobileMoneyWebhookEvent } from './entities/mobile-money-webhook-event.entity';
 import {
   BankProcessingStatus,
-  MobileMoneyStatus,
+  ProviderStatus,
   PaymentChannel,
   ReconciliationStatus,
 } from './enums/mobile-money.enum';
 import { MobileMoneyService } from './mobile-money.service';
 import { MobileMoneyWebhookService } from './mobile-money-webhook.service';
 import { ReconciliationService } from './reconciliation.service';
+import { TransactionEventsService } from '../events/transaction-events.service';
 
 const webhook = (): MobileMoneyWebhookDto => ({
   eventId: 'EVT-20260725-A1B2C3D4',
@@ -32,7 +34,7 @@ const transaction = (): Transaction =>
     aggregatorReference: 'AGG-20260725-A1B2C3D4',
     paymentChannel: PaymentChannel.MOBILE_MONEY,
     status: TransactionStatus.PROCESSING,
-    mobileMoneyStatus: MobileMoneyStatus.CONFIRMED,
+    providerStatus: ProviderStatus.CONFIRMED,
     bankStatus: BankProcessingStatus.PROCESSING,
     reconciliationStatus: ReconciliationStatus.PENDING,
     amount: 1250.75,
@@ -60,6 +62,8 @@ describe('MobileMoneyWebhookService', () => {
   let soap: jest.Mocked<SoapClientService>;
   let audit: jest.Mocked<AuditService>;
   let reconciliation: jest.Mocked<ReconciliationService>;
+  let anchor: jest.Mocked<AnchorService>;
+  let eventLedger: jest.Mocked<TransactionEventsService>;
 
   beforeEach(() => {
     events = {
@@ -94,6 +98,16 @@ describe('MobileMoneyWebhookService', () => {
       }),
     } as unknown as jest.Mocked<ReconciliationService>;
 
+    anchor = {
+      sealTransaction: jest.fn(async (value: Transaction) => value),
+    } as unknown as jest.Mocked<AnchorService>;
+
+    eventLedger = {
+      record: jest.fn(async () => ({}) as never),
+      findChain: jest.fn(async () => []),
+      findLatest: jest.fn(async () => null),
+    } as unknown as jest.Mocked<TransactionEventsService>;
+
     service = new MobileMoneyWebhookService(
       events,
       transactions,
@@ -101,6 +115,8 @@ describe('MobileMoneyWebhookService', () => {
       soap,
       audit,
       reconciliation,
+      anchor,
+      eventLedger,
       { webhookSecret: 'test-secret' } as never,
     );
   });
@@ -124,6 +140,32 @@ describe('MobileMoneyWebhookService', () => {
     );
   });
 
+  it('libere la reclamation quand la transaction reste introuvable', async () => {
+    // Course de commit : le callback devance la visibilite de la ligne.
+    mobileMoney.findByAggregatorReference.mockRejectedValueOnce(new Error('transaction absente'));
+    const payload = webhook();
+
+    await expect(service.handle(payload, service.sign(payload))).rejects.toThrow(
+      'transaction absente',
+    );
+
+    // Sans cette liberation, l evenement resterait PROCESSING et le rejeu de
+    // l agregateur repartirait en « deja traite » : paiement confirme, virement
+    // jamais execute, aucun signal.
+    expect(events.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ processingStatus: 'FAILED' }),
+    );
+  });
+
+  it('ne signe pas identiquement deux decoupages differents des memes champs', () => {
+    // Sans prefixe de longueur, « EVT-1|AGG-VICTIME » + « X » et « EVT-1 » +
+    // « AGG-VICTIME|X » produisaient la meme chaine canonique.
+    const a = { ...webhook(), eventId: 'EVT-1|AGG-VICTIME', aggregatorReference: 'X' };
+    const b = { ...webhook(), eventId: 'EVT-1', aggregatorReference: 'AGG-VICTIME|X' };
+
+    expect(service.sign(a)).not.toBe(service.sign(b));
+  });
+
   it('n appelle pas SOAP lorsqu une autre notification a deja pris la transaction', async () => {
     mobileMoney.confirmAndClaimBankProcessing.mockImplementation(async (value: Transaction) => ({
       transaction: value,
@@ -135,5 +177,22 @@ describe('MobileMoneyWebhookService', () => {
 
     expect(soap.convertAmountToWords).not.toHaveBeenCalled();
     expect(reconciliation.reconcile).not.toHaveBeenCalled();
+  });
+
+  it('ne transforme pas un echec du registre en faux echec bancaire', async () => {
+    eventLedger.record.mockRejectedValueOnce(new Error('registre indisponible'));
+    const payload = webhook();
+
+    await expect(service.handle(payload, service.sign(payload))).rejects.toThrow(
+      'registre indisponible',
+    );
+
+    expect(transactions.save).toHaveBeenCalledTimes(1);
+    expect(transactions.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TransactionStatus.COMPLETED,
+        bankStatus: BankProcessingStatus.COMPLETED,
+      }),
+    );
   });
 });

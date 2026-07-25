@@ -146,7 +146,7 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
     chain.available = true;
     chain.batches.clear();
     await dataSource.query(
-      'TRUNCATE TABLE audit_logs, transactions, anchor_batches RESTART IDENTITY CASCADE',
+      'TRUNCATE TABLE transaction_events, audit_logs, transactions, anchor_batches RESTART IDENTITY CASCADE',
     );
   });
 
@@ -259,7 +259,12 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
         .post('/api/v1/anchors/batches')
         .expect(200);
 
-      expect(outcome.body.anchored).toBe(3);
+      // Le lot couvre desormais les transactions ET les faits du registre : le
+      // compte total depasse donc 3, mais une seule ecriture on-chain a lieu.
+      const [{ count }] = await dataSource.query(
+        'SELECT COUNT(*)::int AS count FROM transaction_events',
+      );
+      expect(outcome.body.anchored).toBe(3 + count);
       expect(chain.batches.size).toBe(1);
 
       for (const reference of references) {

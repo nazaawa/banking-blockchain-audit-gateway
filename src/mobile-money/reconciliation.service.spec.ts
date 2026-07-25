@@ -6,18 +6,19 @@ import { Transaction } from '../transactions/entities/transaction.entity';
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
 import {
   BankProcessingStatus,
-  MobileMoneyStatus,
+  ProviderStatus,
   PaymentChannel,
   ReconciliationStatus,
 } from './enums/mobile-money.enum';
 import { ReconciliationService } from './reconciliation.service';
+import { TransactionEventsService } from '../events/transaction-events.service';
 
 const payment = (overrides: Partial<Transaction> = {}): Transaction =>
   Object.assign(new Transaction(), {
     reference: 'TRF-20260725-8F3A2C71',
     paymentChannel: PaymentChannel.MOBILE_MONEY,
     status: TransactionStatus.COMPLETED,
-    mobileMoneyStatus: MobileMoneyStatus.CONFIRMED,
+    providerStatus: ProviderStatus.CONFIRMED,
     bankStatus: BankProcessingStatus.COMPLETED,
     reconciliationStatus: ReconciliationStatus.PENDING,
     amount: 1250.75,
@@ -46,6 +47,10 @@ describe('ReconciliationService', () => {
         ReconciliationService,
         { provide: getRepositoryToken(Transaction), useValue: repository },
         { provide: AnchorService, useValue: anchor },
+        {
+          provide: TransactionEventsService,
+          useValue: { record: jest.fn(async () => ({})) },
+        },
       ],
     }).compile();
     service = moduleRef.get(ReconciliationService);
@@ -59,12 +64,14 @@ describe('ReconciliationService', () => {
     expect(anchor.sealTransaction).toHaveBeenCalledTimes(1);
   });
 
-  it('detecte un ecart de montant sans sceller la transaction', async () => {
+  it('scelle un ecart de montant au meme titre qu une concordance', async () => {
     const result = await service.reconcile(payment({ aggregatorAmount: 1250.76 }));
 
     expect(result.reconciliationStatus).toBe(ReconciliationStatus.MISMATCH);
     expect(result.reconciliationReason).toContain('montant');
-    expect(anchor.sealTransaction).not.toHaveBeenCalled();
+    // Le rapprochement est tranche : l'issue est definitive et doit etre
+    // opposable. Ne pas la sceller privait de preuve le dossier litigieux.
+    expect(anchor.sealTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('laisse en attente une transaction dont la banque n a pas termine', async () => {

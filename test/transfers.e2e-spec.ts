@@ -99,7 +99,9 @@ describe('Transfers (e2e)', () => {
   beforeEach(async () => {
     convertAmountToWords.mockReset();
     convertAmountToWords.mockResolvedValue(soapSuccess());
-    await dataSource.query('TRUNCATE TABLE audit_logs, transactions RESTART IDENTITY CASCADE');
+    await dataSource.query(
+      'TRUNCATE TABLE transaction_events, audit_logs, transactions RESTART IDENTITY CASCADE',
+    );
   });
 
   const post = (payload: object, headers: Record<string, string> = {}) => {

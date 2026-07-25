@@ -4,7 +4,7 @@ import { TransactionStatus } from '../transactions/enums/transaction-status.enum
 import {
   BankProcessingStatus,
   MobileMoneyOperator,
-  MobileMoneyStatus,
+  ProviderStatus,
   PaymentChannel,
   ReconciliationStatus,
 } from '../mobile-money/enums/mobile-money.enum';
@@ -115,7 +115,7 @@ describe('TransferXmlBuilder', () => {
           mobileMoneyOperator: MobileMoneyOperator.MPESA,
           payerMsisdn: '+243812345678',
           aggregatorReference: 'AGG-20260725-A1B2C3D4E5F6',
-          mobileMoneyStatus: MobileMoneyStatus.CONFIRMED,
+          providerStatus: ProviderStatus.CONFIRMED,
           aggregatorAmount: 1250.75,
           aggregatorCurrency: 'EUR',
           mobileMoneyConfirmedAt: new Date('2026-07-25T10:12:30.000Z'),
