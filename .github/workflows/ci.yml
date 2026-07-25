@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# Une nouvelle poussee annule la verification en cours sur la meme branche :
+# valider un commit deja remplace consomme du temps sans rien apprendre.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  PGUSER: banking
+  PGPASSWORD: banking
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Controles statiques : rapides, sans base, ils echouent vite.
+  # ---------------------------------------------------------------------------
+  static:
+    name: Lint, types et build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint -- --max-warnings=0
+
+      - name: Types
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Build
+        run: npm run build
+
+      - name: Format
+        run: npx prettier --check "src/**/*.ts" "test/**/*.ts" README.md
+
+  # ---------------------------------------------------------------------------
+  # Tests unitaires : aucune dependance externe.
+  # ---------------------------------------------------------------------------
+  unit:
+    name: Tests unitaires
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test -- --ci
+
+  # ---------------------------------------------------------------------------
+  # Tests d'integration : PostgreSQL reel, client SOAP et chaine bouchonnes.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: Tests d integration
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: banking
+          POSTGRES_PASSWORD: banking
+          POSTGRES_DB: banking_soap
+        ports: ['5432:5432']
+        # Sans cette sonde, les etapes suivantes demarrent avant que la base
+        # accepte les connexions, et l echec ressemble a un bug applicatif.
+        options: >-
+          --health-cmd "pg_isready -U banking"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Preparer la base de test
+        # Les suites e2e provisionnent le schema par `synchronize`, qui ne joue
+        # aucune migration : l extension uuid doit donc exister au prealable.
+        run: |
+          psql -h localhost -U banking -d postgres -c 'CREATE DATABASE banking_soap_test'
+          psql -h localhost -U banking -d banking_soap_test \
+            -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'
+
+      - name: Tests d integration
+        run: npm run test:e2e -- --ci
+        env:
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_USERNAME: banking
+          DB_PASSWORD: banking
+
+  # ---------------------------------------------------------------------------
+  # Migrations : rejeu integral, puis controle de derive.
+  #
+  # Ce travail merite d exister separement. Les tests passent avec un schema
+  # construit par `synchronize` ; rien ne garantit pour autant que les
+  # migrations produisent le meme schema. Cet ecart a deja introduit de vraies
+  # regressions ici — contraintes absentes, cles etrangeres recreees a chaque
+  # demarrage. Le controle de derive les attrape avant la production.
+  # ---------------------------------------------------------------------------
+  migrations:
+    name: Migrations et derive de schema
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: banking
+          POSTGRES_PASSWORD: banking
+          POSTGRES_DB: banking_migrations
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U banking"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: '5432'
+      DB_USERNAME: banking
+      DB_PASSWORD: banking
+      DB_NAME: banking_migrations
+      DB_SYNCHRONIZE: 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Rejouer toutes les migrations depuis une base vierge
+        run: npm run migration:run
+
+      - name: Verifier l absence de derive entre migrations et entites
+        # `schema:log` enumere ce que `synchronize` executerait. Toute sortie
+        # autre que « up to date » signale que les entites et les migrations
+        # ont diverge : en developpement, la difference serait appliquee en
+        # silence a chaque demarrage.
+        run: |
+          output=$(npm run --silent typeorm -- schema:log 2>&1)
+          echo "$output"
+          if ! echo "$output" | grep -q "up to date"; then
+            echo "::error::Derive detectee entre les migrations et les entites."
+            exit 1
+          fi
+
+      - name: Verifier que la derniere migration se defait
+        # TypeORM ne defait qu'une migration a la fois : ce controle porte donc
+        # sur la plus recente, celle que la poussee vient d'ajouter. C'est
+        # exactement celle dont on ignore encore si elle sait reculer.
+        run: npm run migration:revert

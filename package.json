@@ -28,7 +28,8 @@
     "contract:compile": "node scripts/compile-contract.js",
     "contract:deploy": "node scripts/deploy-contract.js",
     "chain:node": "hardhat node --port 8545",
-    "ops:verify-restore": "ts-node -r tsconfig-paths/register scripts/verify-restore.ts"
+    "ops:verify-restore": "ts-node -r tsconfig-paths/register scripts/verify-restore.ts",
+    "verify": "npm run lint -- --max-warnings=0 && npx tsc --noEmit -p tsconfig.json && npm run build && npx prettier --check \"src/**/*.ts\" \"test/**/*.ts\" README.md && npm test && npm run test:e2e"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
