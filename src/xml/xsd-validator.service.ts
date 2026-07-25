@@ -9,6 +9,7 @@ export const SCHEMAS = {
   transferRequest: 'transfer-request.xsd',
   transferRecord: 'transfer-record.xsd',
   transferResponse: 'transfer-response.xsd',
+  transactionEvent: 'transaction-event.xsd',
 } as const;
 
 export type SchemaName = (typeof SCHEMAS)[keyof typeof SCHEMAS];

@@ -1,0 +1,243 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { AnchorBatch } from '../blockchain/entities/anchor-batch.entity';
+import { AnchorStatus } from '../blockchain/enums/anchor-status.enum';
+import { EvmAnchorClient } from '../blockchain/evm-anchor.client';
+import { computeFingerprint, toLeaf } from '../blockchain/fingerprint.util';
+import { verifyProof } from '../blockchain/merkle.util';
+import { SCHEMAS, XsdValidatorService } from '../xml/xsd-validator.service';
+import type { TransactionEvent } from './entities/transaction-event.entity';
+import { TransactionEventsService } from './transaction-events.service';
+
+/** Verdict porte sur un maillon de la chaine. */
+export interface EventVerification {
+  sequence: number;
+  eventType: string;
+  occurredAt: Date;
+  /** Le document reconstruit reste conforme a son XSD. */
+  xsdValid: boolean;
+  /** L'empreinte recalculee correspond a l'empreinte scellee. */
+  fingerprintMatches: boolean;
+  /** Le maillon pointe bien vers l'empreinte du fait precedent. */
+  chainIntact: boolean;
+  /** La preuve d'inclusion mene a la racine publiee sur la chaine. */
+  anchorVerified: boolean | null;
+  findings: string[];
+}
+
+export interface EventChainReport {
+  transactionReference: string;
+  verdict: 'VERIFIED' | 'TAMPERED' | 'PARTIALLY_ANCHORED' | 'EMPTY' | 'CHAIN_UNAVAILABLE';
+  eventCount: number;
+  anchoredCount: number;
+  /** Empreinte du dernier maillon : resume l'ensemble de la chaine. */
+  head: string | null;
+  events: EventVerification[];
+  findings: string[];
+  verifiedAt: Date;
+}
+
+/**
+ * Controle d'integrite du registre d'evenements.
+ *
+ * Trois proprietes independantes sont eprouvees, et il faut les trois :
+ *
+ *  - **Contenu** — chaque document reconstruit redonne son empreinte scellee.
+ *    Detecte l'alteration d'un fait.
+ *  - **Ordre** — chaque maillon pointe vers l'empreinte du precedent. Detecte la
+ *    suppression ou l'insertion d'un fait, que le controle de contenu seul
+ *    laisserait passer : un evenement retire laisse les autres intacts.
+ *  - **Publication** — la preuve d'inclusion mene a une racine que l'operateur
+ *    ne controle plus. C'est ce qui empeche de reecrire toute la chaine de bout
+ *    en bout et de la re-sceller.
+ */
+@Injectable()
+export class EventChainVerificationService {
+  private readonly logger = new Logger(EventChainVerificationService.name);
+
+  constructor(
+    @InjectRepository(AnchorBatch)
+    private readonly batches: Repository<AnchorBatch>,
+    private readonly eventsService: TransactionEventsService,
+    private readonly xsdValidator: XsdValidatorService,
+    private readonly client: EvmAnchorClient,
+  ) {}
+
+  async verify(transactionReference: string): Promise<EventChainReport> {
+    const chain = await this.eventsService.findChain(transactionReference);
+    const findings: string[] = [];
+    const verifiedAt = new Date();
+
+    if (chain.length === 0) {
+      findings.push('Aucun evenement consigne pour cette transaction : rien a verifier.');
+      return {
+        transactionReference,
+        verdict: 'EMPTY',
+        eventCount: 0,
+        anchoredCount: 0,
+        head: null,
+        events: [],
+        findings,
+        verifiedAt,
+      };
+    }
+
+    const results: EventVerification[] = [];
+    let tampered = false;
+    let chainUnavailable = false;
+    let anchoredCount = 0;
+
+    for (const [index, event] of chain.entries()) {
+      const result = await this.verifyEvent(event, index === 0 ? null : chain[index - 1]);
+      results.push(result);
+
+      if (!result.xsdValid || !result.fingerprintMatches || !result.chainIntact) tampered = true;
+      if (result.anchorVerified === true) anchoredCount += 1;
+      if (result.anchorVerified === null && event.anchorStatus === AnchorStatus.ANCHORED) {
+        chainUnavailable = true;
+      }
+      if (result.anchorVerified === false) tampered = true;
+    }
+
+    // Les rangs doivent former une suite continue : un trou signale une
+    // suppression que le chainage seul pourrait ne pas revéler si l'on a retire
+    // le dernier maillon.
+    const expected = chain.map((_, index) => index + 1);
+    const actual = chain.map((event) => event.sequence);
+    if (JSON.stringify(expected) !== JSON.stringify(actual)) {
+      tampered = true;
+      findings.push(
+        `Les rangs ne forment pas une suite continue : attendu ${expected.join(', ')}, ` +
+          `constate ${actual.join(', ')}. Au moins un evenement a ete retire.`,
+      );
+    }
+
+    const head = chain[chain.length - 1].fingerprint;
+
+    if (tampered) {
+      findings.push('ALTERATION DETECTEE dans le registre d evenements.');
+    } else if (chainUnavailable) {
+      findings.push(
+        'Chaine injoignable : contenu et ordre sont confirmes, la publication n a pas pu etre verifiee.',
+      );
+    } else if (anchoredCount < chain.length) {
+      findings.push(
+        `${anchoredCount} evenement(s) ancre(s) sur ${chain.length} : les plus recents ` +
+          'attendent le prochain lot.',
+      );
+    } else {
+      findings.push(
+        `Les ${chain.length} evenements sont intacts, ordonnes et ancres. ` +
+          `Sommet de chaine : ${head}.`,
+      );
+    }
+
+    return {
+      transactionReference,
+      verdict: tampered
+        ? 'TAMPERED'
+        : chainUnavailable
+          ? 'CHAIN_UNAVAILABLE'
+          : anchoredCount < chain.length
+            ? 'PARTIALLY_ANCHORED'
+            : 'VERIFIED',
+      eventCount: chain.length,
+      anchoredCount,
+      head,
+      events: results,
+      findings,
+      verifiedAt,
+    };
+  }
+
+  private async verifyEvent(
+    event: TransactionEvent,
+    previous: TransactionEvent | null,
+  ): Promise<EventVerification> {
+    const findings: string[] = [];
+
+    // --- Contenu -------------------------------------------------------------
+    const xml = this.eventsService.rebuildDocument(event);
+    const violations = await this.xsdValidator.validate(xml, SCHEMAS.transactionEvent);
+    const xsdValid = violations.length === 0;
+    if (!xsdValid) {
+      findings.push(`Document non conforme : ${violations.map((v) => v.message).join(' | ')}`);
+    }
+
+    const recomputed = computeFingerprint(event.fingerprintSalt, xml);
+    const fingerprintMatches = recomputed.toLowerCase() === event.fingerprint.toLowerCase();
+    if (!fingerprintMatches) {
+      findings.push('Le fait consigne ne produit plus son empreinte scellee.');
+    }
+
+    // --- Ordre ---------------------------------------------------------------
+    const expectedPrevious = previous?.fingerprint ?? null;
+    const chainIntact =
+      (event.previousFingerprint ?? null)?.toLowerCase() === expectedPrevious?.toLowerCase() ||
+      (event.previousFingerprint === null && expectedPrevious === null);
+
+    if (!chainIntact) {
+      findings.push(
+        previous === null
+          ? 'Le premier maillon reference un predecesseur : la tete de chaine a ete retiree.'
+          : 'Le maillon ne pointe pas vers l empreinte du fait precedent.',
+      );
+    }
+
+    // --- Publication ---------------------------------------------------------
+    const anchorVerified = await this.verifyAnchor(event, findings);
+
+    return {
+      sequence: event.sequence,
+      eventType: event.eventType,
+      occurredAt: event.occurredAt,
+      xsdValid,
+      fingerprintMatches,
+      chainIntact,
+      anchorVerified,
+      findings,
+    };
+  }
+
+  /** `null` = non ancre ou chaine injoignable ; le verdict global les distingue. */
+  private async verifyAnchor(event: TransactionEvent, findings: string[]): Promise<boolean | null> {
+    if (event.anchorStatus !== AnchorStatus.ANCHORED || !event.batchId || !event.merkleProof) {
+      return null;
+    }
+
+    const batch = await this.batches.findOne({ where: { id: event.batchId } });
+    if (!batch) {
+      findings.push(`Lot ${event.batchId} introuvable : preuve inexploitable.`);
+      return false;
+    }
+
+    const leaf = toLeaf(event.fingerprint);
+    if (!verifyProof(leaf, event.merkleProof, batch.merkleRoot)) {
+      findings.push('La preuve d inclusion ne mene pas a la racine du lot.');
+      return false;
+    }
+
+    try {
+      const onChain = await this.client.getBatch(batch.id);
+      if (!onChain) {
+        findings.push('Lot marque ancre en base mais absent de la chaine.');
+        return false;
+      }
+      if (onChain.merkleRoot.toLowerCase() !== batch.merkleRoot.toLowerCase()) {
+        findings.push(
+          `Racine en base (${batch.merkleRoot}) differente de celle publiee (${onChain.merkleRoot}).`,
+        );
+        return false;
+      }
+      return await this.client.verifyInclusion(batch.id, leaf, event.merkleProof);
+    } catch (error) {
+      this.logger.warn({
+        event: 'event-chain.chain.unavailable',
+        reference: event.transactionReference,
+        reason: error instanceof Error ? error.message : 'erreur inconnue',
+      });
+      return null;
+    }
+  }
+}

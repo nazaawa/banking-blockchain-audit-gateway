@@ -114,13 +114,60 @@
         </xs:simpleType>
       </xs:element>
       <xs:element name="aggregatorReference" type="xs:string"/>
-      <xs:element name="status" fixed="CONFIRMED"/>
-      <xs:element name="confirmedAmount" type="tns:AmountType"/>
-      <xs:element name="confirmedCurrency" type="tns:CurrencyType"/>
-      <xs:element name="confirmedAt" type="xs:dateTime"/>
-      <xs:element name="bankStatus" fixed="COMPLETED"/>
-      <xs:element name="reconciliationStatus" fixed="MATCHED"/>
-      <xs:element name="reconciledAt" type="xs:dateTime"/>
+
+      <!--
+        Le schema couvre desormais toutes les issues tranchees, et non le seul
+        chemin nominal. Restreindre le scellement aux dossiers conformes privait
+        de preuve opposable exactement les cas qui en ont besoin : ecart de
+        montant, refus operateur, echec de la jambe bancaire.
+      -->
+      <xs:element name="status">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="CONFIRMED"/>
+            <xs:enumeration value="FAILED"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+
+      <!--
+        Renseignes uniquement si l'agregateur a effectivement notifie un
+        montant. Un refus operateur avant toute confirmation les laisse absents.
+      -->
+      <xs:element name="confirmedAmount" type="tns:AmountType" minOccurs="0"/>
+      <xs:element name="confirmedCurrency" type="tns:CurrencyType" minOccurs="0"/>
+      <xs:element name="confirmedAt" type="xs:dateTime" minOccurs="0"/>
+
+      <xs:element name="bankStatus">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="NOT_STARTED"/>
+            <!-- Instruction volontairement refusee par la passerelle. -->
+            <xs:enumeration value="BLOCKED"/>
+            <xs:enumeration value="COMPLETED"/>
+            <xs:enumeration value="FAILED"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+
+      <!--
+        Seules les issues definitives sont scellables. PENDING en est exclu :
+        un dossier encore ouvert ne doit pas etre fige.
+      -->
+      <xs:element name="reconciliationStatus">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="MATCHED"/>
+            <xs:enumeration value="MISMATCH"/>
+            <xs:enumeration value="AMOUNT_MISMATCH"/>
+            <xs:enumeration value="CURRENCY_MISMATCH"/>
+            <!-- Aucun encaissement fournisseur : il n'y a rien a rapprocher. -->
+            <xs:enumeration value="NOT_APPLICABLE"/>
+            <xs:enumeration value="MANUAL_REVIEW"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="reconciledAt" type="xs:dateTime" minOccurs="0"/>
     </xs:sequence>
   </xs:complexType>
 

@@ -6,8 +6,10 @@ import { TransactionStatus } from '../../transactions/enums/transaction-status.e
 import {
   BankProcessingStatus,
   MobileMoneyOperator,
-  MobileMoneyStatus,
+  ProviderStatus,
   ReconciliationStatus,
+  RefundStatus,
+  CaseStatus,
 } from '../enums/mobile-money.enum';
 
 /** Vue API du cycle complet Mobile Money -> banque -> rapprochement. */
@@ -27,14 +29,26 @@ export class MobileMoneyResponseDto {
   @ApiProperty({ example: '+24****78' })
   payerMsisdnMasked!: string;
 
-  @ApiProperty({ enum: MobileMoneyStatus })
-  mobileMoneyStatus!: MobileMoneyStatus;
+  @ApiProperty({ enum: ProviderStatus })
+  providerStatus!: ProviderStatus;
 
   @ApiProperty({ enum: BankProcessingStatus })
   bankStatus!: BankProcessingStatus;
 
   @ApiProperty({ enum: ReconciliationStatus })
   reconciliationStatus!: ReconciliationStatus;
+
+  @ApiProperty({
+    enum: RefundStatus,
+    description: 'Obligation de remboursement envers le payeur',
+  })
+  refundStatus!: RefundStatus;
+
+  @ApiProperty({ enum: CaseStatus, description: 'Suivi de l action humaine requise' })
+  caseStatus!: CaseStatus;
+
+  @ApiPropertyOptional({ description: 'Motif d ouverture du dossier' })
+  caseReason?: string;
 
   @ApiProperty({ example: 'DE89****3000' })
   creditorIbanMasked!: string;
@@ -73,9 +87,12 @@ export class MobileMoneyResponseDto {
     dto.status = transaction.status;
     dto.operator = transaction.mobileMoneyOperator as MobileMoneyOperator;
     dto.payerMsisdnMasked = maskPartial(transaction.payerMsisdn as string, 3, 2);
-    dto.mobileMoneyStatus = transaction.mobileMoneyStatus as MobileMoneyStatus;
+    dto.providerStatus = transaction.providerStatus as ProviderStatus;
     dto.bankStatus = transaction.bankStatus as BankProcessingStatus;
     dto.reconciliationStatus = transaction.reconciliationStatus as ReconciliationStatus;
+    dto.refundStatus = transaction.refundStatus;
+    dto.caseStatus = transaction.caseStatus;
+    dto.caseReason = transaction.caseReason ?? undefined;
     dto.creditorIbanMasked = maskIban(transaction.creditorIban);
     dto.creditorName = transaction.creditorName;
     dto.amount = Number(transaction.amount);

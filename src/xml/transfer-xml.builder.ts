@@ -83,21 +83,33 @@ export class TransferXmlBuilder {
             this.element('operator', transaction.mobileMoneyOperator as string, 2),
             this.element('payerMsisdn', transaction.payerMsisdn as string, 2),
             this.element('aggregatorReference', transaction.aggregatorReference as string, 2),
-            this.element('status', transaction.mobileMoneyStatus as string, 2),
-            this.element(
+            this.element('status', transaction.providerStatus as string, 2),
+            // Ces trois elements n'existent qu'apres une notification de
+            // l'agregateur : un refus emis avant toute confirmation les laisse
+            // nuls. Les traiter comme obligatoires faisait echouer la
+            // serialisation — donc le scellement — sans autre trace qu'un log.
+            this.optionalElement(
               'confirmedAmount',
-              this.formatAmount(Number(transaction.aggregatorAmount)),
+              transaction.aggregatorAmount === null
+                ? null
+                : this.formatAmount(Number(transaction.aggregatorAmount)),
               2,
             ),
-            this.element('confirmedCurrency', transaction.aggregatorCurrency as string, 2),
-            this.element(
+            this.optionalElement('confirmedCurrency', transaction.aggregatorCurrency, 2),
+            this.optionalElement(
               'confirmedAt',
-              this.formatDate(transaction.mobileMoneyConfirmedAt as Date),
+              transaction.mobileMoneyConfirmedAt === null
+                ? null
+                : this.formatDate(transaction.mobileMoneyConfirmedAt),
               2,
             ),
             this.element('bankStatus', transaction.bankStatus as string, 2),
             this.element('reconciliationStatus', transaction.reconciliationStatus as string, 2),
-            this.element('reconciledAt', this.formatDate(transaction.reconciledAt as Date), 2),
+            this.optionalElement(
+              'reconciledAt',
+              transaction.reconciledAt === null ? null : this.formatDate(transaction.reconciledAt),
+              2,
+            ),
             `${INDENT}</mobileMoney>`,
           ]
         : [];

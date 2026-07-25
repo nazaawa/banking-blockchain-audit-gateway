@@ -3,11 +3,18 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { AnchorBatch } from '../blockchain/entities/anchor-batch.entity';
+import { TransactionEvent } from '../events/entities/transaction-event.entity';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { MobileMoneyWebhookEvent } from '../mobile-money/entities/mobile-money-webhook-event.entity';
 
 /** Entites gerees par TypeORM, partagees avec la CLI de migration. */
-export const ENTITIES = [Transaction, AuditLog, AnchorBatch, MobileMoneyWebhookEvent];
+export const ENTITIES = [
+  Transaction,
+  AuditLog,
+  AnchorBatch,
+  MobileMoneyWebhookEvent,
+  TransactionEvent,
+];
 
 @Module({
   imports: [

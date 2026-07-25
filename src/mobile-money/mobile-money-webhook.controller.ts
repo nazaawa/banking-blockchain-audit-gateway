@@ -13,8 +13,16 @@ export class MobileMoneyWebhookController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Recevoir une confirmation signee de l agregateur',
-    description:
-      'La signature porte sur eventId|aggregatorReference|status|amount(2 decimales)|currency|occurredAt|failureReason.',
+    description: [
+      'La signature HMAC SHA-256 porte sur les champs eventId, aggregatorReference,',
+      'status, amount (2 decimales), currency, occurredAt et failureReason,',
+      'concatenes dans cet ordre et **prefixes de leur longueur** :',
+      '`<nombre d octets UTF-8>:<valeur>` separes par « | ».',
+      '',
+      'Le prefixe de longueur est indispensable : sans lui, deplacer la frontiere',
+      'entre deux champs adjacents produit la meme chaine signee, et donc une',
+      'signature valide pour un autre aggregatorReference.',
+    ].join('\n'),
   })
   @ApiHeader({
     name: 'X-Mobile-Money-Signature',

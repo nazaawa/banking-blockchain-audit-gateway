@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Contrat du fait metier scelle.
+
+  Difference de fond avec transfer-record.xsd : celui-ci decrit un ETAT final,
+  celui-la decrit un FAIT date. Un etat se remplace, un fait s'ajoute — c'est ce
+  qui permet de prouver une sequence plutot qu'un instantane.
+
+  Le document contient `previousFingerprint`, l'empreinte de l'evenement
+  precedent. Le chainage est donc lui-meme couvert par l'empreinte : retirer un
+  evenement du milieu de la chaine devient detectable, meme si le lot Merkle de
+  chaque evenement restant demeure valide.
+
+  Ce document ne contient volontairement ni IBAN ni MSISDN : le detail des
+  parties vit dans l'enregistrement de transaction. Un evenement porte le
+  deroulement, pas l'identite — ce qui limite ce qu'une empreinte compromise
+  pourrait reveler.
+-->
+<xs:schema
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:banking:event:1.0"
+    targetNamespace="urn:banking:event:1.0"
+    elementFormDefault="qualified"
+    version="1.0">
+
+  <xs:simpleType name="TransactionReferenceType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="TRF-[0-9]{8}-[0-9A-HJ-NP-Z]{8}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="Bytes32Type">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="0x[0-9a-f]{64}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="CurrencyType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Z]{3}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="AmountType">
+    <xs:annotation>
+      <xs:documentation>Toujours 2 decimales, pour que la serialisation soit unique.</xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[0-9]{1,16}\.[0-9]{2}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="EventTypeType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="TRANSFER_INITIATED"/>
+      <xs:enumeration value="TRANSFER_COMPLETED"/>
+      <xs:enumeration value="TRANSFER_FAILED"/>
+      <xs:enumeration value="PAYMENT_INITIATED"/>
+      <xs:enumeration value="PROVIDER_CONFIRMED"/>
+      <xs:enumeration value="PROVIDER_FAILED"/>
+      <xs:enumeration value="AMOUNT_MISMATCH_DETECTED"/>
+      <xs:enumeration value="BANK_PROCESSING_BLOCKED"/>
+      <xs:enumeration value="BANK_PROCESSING_COMPLETED"/>
+      <xs:enumeration value="BANK_PROCESSING_FAILED"/>
+      <xs:enumeration value="RECONCILIATION_MATCHED"/>
+      <xs:enumeration value="RECONCILIATION_MISMATCH"/>
+      <xs:enumeration value="CASE_OPENED"/>
+      <xs:enumeration value="CASE_RESOLVED"/>
+      <xs:enumeration value="CASE_CLOSED"/>
+      <xs:enumeration value="REFUND_REQUESTED"/>
+      <xs:enumeration value="REFUND_COMPLETED"/>
+      <xs:enumeration value="REFUND_FAILED"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ===================================================================== -->
+
+  <xs:complexType name="LegStatusesType">
+    <xs:annotation>
+      <xs:documentation>
+        Etat des cinq dimensions au moment du fait. Chacune est optionnelle : un
+        virement classique n'a ni jambe fournisseur ni dossier.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="provider" type="xs:string" minOccurs="0"/>
+      <xs:element name="bank" type="xs:string" minOccurs="0"/>
+      <xs:element name="reconciliation" type="xs:string" minOccurs="0"/>
+      <xs:element name="refund" type="xs:string" minOccurs="0"/>
+      <xs:element name="case" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="AmountsType">
+    <xs:sequence>
+      <xs:element name="expected" type="tns:AmountType"/>
+      <xs:element name="currency" type="tns:CurrencyType"/>
+      <!-- Renseignes uniquement lorsqu'un montant a effectivement ete constate. -->
+      <xs:element name="observed" type="tns:AmountType" minOccurs="0"/>
+      <xs:element name="observedCurrency" type="tns:CurrencyType" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="TransactionEventType">
+    <xs:sequence>
+      <xs:element name="eventId" type="xs:string"/>
+      <xs:element name="eventType" type="tns:EventTypeType"/>
+      <xs:element name="sequence" type="xs:positiveInteger"/>
+      <xs:element name="transactionReference" type="tns:TransactionReferenceType"/>
+      <xs:element name="providerReference" type="xs:string" minOccurs="0"/>
+      <xs:element name="bankReference" type="xs:string" minOccurs="0"/>
+      <xs:element name="statuses" type="tns:LegStatusesType"/>
+      <xs:element name="amounts" type="tns:AmountsType"/>
+      <xs:element name="occurredAt" type="xs:dateTime"/>
+      <xs:element name="correlationId" type="xs:string"/>
+      <xs:element name="detail" type="xs:string" minOccurs="0"/>
+      <!--
+        Absent sur le premier evenement d'une transaction : c'est ce qui
+        distingue une chaine tronquee en tete d'une chaine complete.
+      -->
+      <xs:element name="previousFingerprint" type="tns:Bytes32Type" minOccurs="0"/>
+    </xs:sequence>
+    <xs:attribute name="version" type="xs:string" use="required"/>
+  </xs:complexType>
+
+  <xs:element name="TransactionEvent" type="tns:TransactionEventType"/>
+
+</xs:schema>

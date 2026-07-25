@@ -2,10 +2,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AnchorService } from '../blockchain/anchor.service';
+import { TransactionEventsService } from '../events/transaction-events.service';
+import { TransactionEventType } from '../events/enums/transaction-event.enum';
+import { amountsMatch, currenciesMatch } from './amount.util';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import {
   BankProcessingStatus,
-  MobileMoneyStatus,
+  ProviderStatus,
   PaymentChannel,
   ReconciliationStatus,
 } from './enums/mobile-money.enum';
@@ -19,13 +22,14 @@ export class ReconciliationService {
     @InjectRepository(Transaction)
     private readonly transactions: Repository<Transaction>,
     private readonly anchorService: AnchorService,
+    private readonly events: TransactionEventsService,
   ) {}
 
   async reconcile(transaction: Transaction): Promise<Transaction> {
     if (transaction.paymentChannel !== PaymentChannel.MOBILE_MONEY) return transaction;
 
     if (
-      transaction.mobileMoneyStatus !== MobileMoneyStatus.CONFIRMED ||
+      transaction.providerStatus !== ProviderStatus.CONFIRMED ||
       transaction.bankStatus !== BankProcessingStatus.COMPLETED
     ) {
       transaction.reconciliationStatus =
@@ -39,10 +43,10 @@ export class ReconciliationService {
       return this.transactions.save(transaction);
     }
 
-    const amountMatches =
-      this.toMinorUnits(transaction.aggregatorAmount) ===
-      this.toMinorUnits(Number(transaction.amount));
-    const currencyMatches = transaction.aggregatorCurrency === transaction.currency;
+    // Meme comparateur que le garde-fou pre-execution : les deux controles ne
+    // doivent jamais pouvoir diverger.
+    const amountMatches = amountsMatch(transaction.aggregatorAmount, Number(transaction.amount));
+    const currencyMatches = currenciesMatch(transaction.aggregatorCurrency, transaction.currency);
 
     transaction.reconciledAt = new Date();
     transaction.reconciliationStatus =
@@ -60,16 +64,26 @@ export class ReconciliationService {
             .join('; ');
 
     const reconciled = await this.transactions.save(transaction);
+    await this.events.record({
+      type:
+        reconciled.reconciliationStatus === ReconciliationStatus.MATCHED
+          ? TransactionEventType.RECONCILIATION_MATCHED
+          : TransactionEventType.RECONCILIATION_MISMATCH,
+      transaction: reconciled,
+      observedAmount: reconciled.aggregatorAmount,
+      observedCurrency: reconciled.aggregatorCurrency,
+      detail: reconciled.reconciliationReason,
+    });
     this.logger.log({
       event: 'mobile-money.reconciled',
       reference: reconciled.reference,
       reconciliationStatus: reconciled.reconciliationStatus,
     });
 
-    // Le document final n'est construit et scelle qu'apres un MATCHED.
-    return reconciled.reconciliationStatus === ReconciliationStatus.MATCHED
-      ? this.anchorService.sealTransaction(reconciled)
-      : reconciled;
+    // Le rapprochement est tranche : l'issue est figee, qu'elle soit conforme
+    // ou non. Un ecart doit etre ancre au meme titre qu'une concordance — c'est
+    // le dossier litigieux qui a le plus besoin d'une preuve opposable.
+    return this.anchorService.sealTransaction(reconciled);
   }
 
   /** Rejoue le rapprochement des lignes devenues eligibles apres une reprise. */
@@ -78,7 +92,7 @@ export class ReconciliationService {
       where: {
         paymentChannel: PaymentChannel.MOBILE_MONEY,
         reconciliationStatus: ReconciliationStatus.PENDING,
-        mobileMoneyStatus: MobileMoneyStatus.CONFIRMED,
+        providerStatus: ProviderStatus.CONFIRMED,
         bankStatus: BankProcessingStatus.COMPLETED,
       },
       order: { createdAt: 'ASC' },
@@ -92,9 +106,5 @@ export class ReconciliationService {
       if (result.reconciliationStatus === ReconciliationStatus.MISMATCH) mismatched += 1;
     }
     return { examined: pending.length, matched, mismatched };
-  }
-
-  private toMinorUnits(amount: number | null): number | null {
-    return amount === null ? null : Math.round(Number(amount) * 100);
   }
 }

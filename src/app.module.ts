@@ -12,6 +12,7 @@ import { HealthModule } from './health/health.module';
 import { SoapModule } from './soap/soap.module';
 import { XmlModule } from './xml/xml.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
+import { EventsModule } from './events/events.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { MobileMoneyModule } from './mobile-money/mobile-money.module';
 
@@ -28,6 +29,7 @@ import { MobileMoneyModule } from './mobile-money/mobile-money.module';
     SoapModule,
     XmlModule,
     BlockchainModule,
+    EventsModule,
     AuditModule,
     TransactionsModule,
     MobileMoneyModule,

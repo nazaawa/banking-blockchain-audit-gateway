@@ -10,10 +10,12 @@ import {
 import { AnchorStatus } from '../../blockchain/enums/anchor-status.enum';
 import {
   BankProcessingStatus,
+  CaseStatus,
   MobileMoneyOperator,
-  MobileMoneyStatus,
   PaymentChannel,
+  ProviderStatus,
   ReconciliationStatus,
+  RefundStatus,
 } from '../../mobile-money/enums/mobile-money.enum';
 import { TransactionStatus } from '../enums/transaction-status.enum';
 
@@ -138,12 +140,12 @@ export class Transaction {
   aggregatorReference!: string | null;
 
   @Column({
-    name: 'mobile_money_status',
+    name: 'provider_status',
     type: 'enum',
-    enum: MobileMoneyStatus,
+    enum: ProviderStatus,
     nullable: true,
   })
-  mobileMoneyStatus!: MobileMoneyStatus | null;
+  providerStatus!: ProviderStatus | null;
 
   @Column({
     name: 'bank_status',
@@ -182,6 +184,35 @@ export class Transaction {
 
   @Column({ name: 'reconciliation_reason', type: 'varchar', length: 512, nullable: true })
   reconciliationReason!: string | null;
+
+  /**
+   * Obligation de remboursement envers le payeur.
+   *
+   * Dimension distincte du statut du virement : un virement non execute alors
+   * que le fournisseur a encaisse laisse une dette, que `TransactionStatus`
+   * seul ne peut pas exprimer.
+   */
+  @Column({
+    name: 'refund_status',
+    type: 'enum',
+    enum: RefundStatus,
+    default: RefundStatus.NOT_REQUIRED,
+  })
+  refundStatus!: RefundStatus;
+
+  /** Suivi de l'action humaine appelee par une anomalie. */
+  @Index('idx_transactions_case_status')
+  @Column({
+    name: 'case_status',
+    type: 'enum',
+    enum: CaseStatus,
+    default: CaseStatus.NONE,
+  })
+  caseStatus!: CaseStatus;
+
+  /** Motif d'ouverture du dossier, lisible par un operateur. */
+  @Column({ name: 'case_reason', type: 'varchar', length: 512, nullable: true })
+  caseReason!: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

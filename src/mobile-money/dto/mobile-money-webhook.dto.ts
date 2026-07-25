@@ -2,11 +2,11 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { IsEnum, IsISO8601, IsOptional, IsString, Length, Matches } from 'class-validator';
 import { IsMonetaryAmount } from '../../common/validators/is-monetary-amount.validator';
-import { MobileMoneyStatus } from '../enums/mobile-money.enum';
+import { ProviderStatus } from '../enums/mobile-money.enum';
 
 export enum MobileMoneyWebhookStatus {
-  CONFIRMED = MobileMoneyStatus.CONFIRMED,
-  FAILED = MobileMoneyStatus.FAILED,
+  CONFIRMED = ProviderStatus.CONFIRMED,
+  FAILED = ProviderStatus.FAILED,
 }
 
 /** Notification signee emise par l'agregateur (ou par son simulateur local). */
