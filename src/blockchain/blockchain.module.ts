@@ -8,7 +8,6 @@ import { AnchorService } from './anchor.service';
 import { AnchorsController } from './anchors.controller';
 import { AnchorBatch } from './entities/anchor-batch.entity';
 import { EvmAnchorClient } from './evm-anchor.client';
-import { IntegrityVerificationService } from './integrity-verification.service';
 
 /**
  * Scellement cryptographique, ancrage blockchain et controle d'integrite.
@@ -24,7 +23,7 @@ import { IntegrityVerificationService } from './integrity-verification.service';
     XmlModule,
   ],
   controllers: [AnchorsController],
-  providers: [AnchorService, EvmAnchorClient, IntegrityVerificationService],
-  exports: [AnchorService, EvmAnchorClient, IntegrityVerificationService],
+  providers: [AnchorService, EvmAnchorClient],
+  exports: [AnchorService, EvmAnchorClient],
 })
 export class BlockchainModule {}

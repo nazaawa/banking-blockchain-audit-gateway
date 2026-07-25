@@ -7,7 +7,6 @@ import type { XsdViolation } from './exceptions/xml.exceptions';
 
 export const SCHEMAS = {
   transferRequest: 'transfer-request.xsd',
-  transferRecord: 'transfer-record.xsd',
   transferResponse: 'transfer-response.xsd',
   transactionEvent: 'transaction-event.xsd',
 } as const;
@@ -98,11 +97,11 @@ export class XsdValidatorService {
     ].filter((candidate): candidate is string => Boolean(candidate));
 
     const found = candidates.find((candidate) =>
-      existsSync(join(candidate, SCHEMAS.transferRecord)),
+      existsSync(join(candidate, SCHEMAS.transactionEvent)),
     );
 
     if (!found) {
-      throw new XsdSchemaNotFoundException(SCHEMAS.transferRecord, candidates.join(', '));
+      throw new XsdSchemaNotFoundException(SCHEMAS.transactionEvent, candidates.join(', '));
     }
 
     return found;

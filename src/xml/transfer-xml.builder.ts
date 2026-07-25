@@ -1,20 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import type { CreateTransferDto } from '../transactions/dto/create-transfer.dto';
-import type { Transaction } from '../transactions/entities/transaction.entity';
-import { PaymentChannel } from '../mobile-money/enums/mobile-money.enum';
 
 /** Espace de noms des documents metier de la passerelle. */
 export const TRANSFER_NAMESPACE = 'urn:banking:transfer:1.0';
-
-/**
- * Version du format de scellement.
- *
- * Toute modification de la serialisation (ordre, indentation, formatage des
- * nombres) change les empreintes. L'incrementer permet de conserver un
- * serialiseur historique pour rejouer la verification d'archives anciennes.
- */
-export const RECORD_FORMAT_VERSION = '1.0';
-export const MOBILE_MONEY_RECORD_FORMAT_VERSION = '2.0';
 
 /** Indentation fixe : elle fait partie du document canonique. */
 const INDENT = '  ';
@@ -59,99 +47,6 @@ export class TransferXmlBuilder {
       body,
       '</TransferRequest>',
     ].join('\n');
-  }
-
-  /**
-   * Document scelle, valide contre `transfer-record.xsd` puis hache.
-   *
-   * @throws Error si la transaction n'est pas dans un etat terminal — une
-   *         transaction encore en cours changerait d'empreinte.
-   */
-  buildTransferRecord(transaction: Transaction): string {
-    if (transaction.processedAt === null) {
-      throw new Error(
-        `La transaction ${transaction.reference} n'est pas dans un etat terminal : ` +
-          `elle ne peut pas etre scellee.`,
-      );
-    }
-
-    const formatVersion = this.getRecordFormatVersion(transaction);
-    const mobileMoneyLines =
-      transaction.paymentChannel === PaymentChannel.MOBILE_MONEY
-        ? [
-            `${INDENT}<mobileMoney>`,
-            this.element('operator', transaction.mobileMoneyOperator as string, 2),
-            this.element('payerMsisdn', transaction.payerMsisdn as string, 2),
-            this.element('aggregatorReference', transaction.aggregatorReference as string, 2),
-            this.element('status', transaction.providerStatus as string, 2),
-            // Ces trois elements n'existent qu'apres une notification de
-            // l'agregateur : un refus emis avant toute confirmation les laisse
-            // nuls. Les traiter comme obligatoires faisait echouer la
-            // serialisation — donc le scellement — sans autre trace qu'un log.
-            this.optionalElement(
-              'confirmedAmount',
-              transaction.aggregatorAmount === null
-                ? null
-                : this.formatAmount(Number(transaction.aggregatorAmount)),
-              2,
-            ),
-            this.optionalElement('confirmedCurrency', transaction.aggregatorCurrency, 2),
-            this.optionalElement(
-              'confirmedAt',
-              transaction.mobileMoneyConfirmedAt === null
-                ? null
-                : this.formatDate(transaction.mobileMoneyConfirmedAt),
-              2,
-            ),
-            this.element('bankStatus', transaction.bankStatus as string, 2),
-            this.element('reconciliationStatus', transaction.reconciliationStatus as string, 2),
-            this.optionalElement(
-              'reconciledAt',
-              transaction.reconciledAt === null ? null : this.formatDate(transaction.reconciledAt),
-              2,
-            ),
-            `${INDENT}</mobileMoney>`,
-          ]
-        : [];
-
-    const lines = [
-      '<?xml version="1.0" encoding="UTF-8"?>',
-      `<TransferRecord xmlns="${TRANSFER_NAMESPACE}" version="${formatVersion}">`,
-      this.element('reference', transaction.reference, 1),
-      this.element('status', transaction.status, 1),
-      `${INDENT}<debtor>`,
-      this.element('iban', transaction.debtorIban, 2),
-      this.optionalElement('name', transaction.debtorName, 2),
-      `${INDENT}</debtor>`,
-      `${INDENT}<creditor>`,
-      this.element('iban', transaction.creditorIban, 2),
-      this.optionalElement('name', transaction.creditorName, 2),
-      `${INDENT}</creditor>`,
-      this.element('amount', this.formatAmount(Number(transaction.amount)), 1),
-      this.element('currency', transaction.currency, 1),
-      this.optionalElement('endToEndLabel', transaction.endToEndLabel, 1),
-      ...mobileMoneyLines,
-      `${INDENT}<soap>`,
-      this.optionalElement('operation', transaction.soapOperation, 2),
-      this.optionalElement('durationMs', this.formatInteger(transaction.soapDurationMs), 2),
-      this.optionalElement('attempts', this.formatInteger(transaction.soapAttempts), 2),
-      this.optionalElement('amountInWords', transaction.amountInWords, 2),
-      this.optionalElement('faultCode', transaction.faultCode, 2),
-      this.optionalElement('faultString', transaction.faultString, 2),
-      `${INDENT}</soap>`,
-      this.element('correlationId', transaction.correlationId, 1),
-      this.element('createdAt', this.formatDate(transaction.createdAt), 1),
-      this.element('processedAt', this.formatDate(transaction.processedAt), 1),
-      '</TransferRecord>',
-    ];
-
-    return lines.filter((line): line is string => line !== null).join('\n');
-  }
-
-  getRecordFormatVersion(transaction: Transaction): string {
-    return transaction.paymentChannel === PaymentChannel.MOBILE_MONEY
-      ? MOBILE_MONEY_RECORD_FORMAT_VERSION
-      : RECORD_FORMAT_VERSION;
   }
 
   // -------------------------------------------------------------------------
