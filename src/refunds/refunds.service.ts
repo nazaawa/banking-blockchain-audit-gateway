@@ -1,5 +1,6 @@
 import {
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   Logger,
@@ -133,6 +134,20 @@ export class RefundsService {
         throw new UnprocessableEntityException({
           error: 'REFUND_ALREADY_RETRYABLE',
           message: 'Ce dossier est deja rejouable : une simple nouvelle demande suffit',
+        });
+      }
+
+      // Separation des taches : lever un refus est une decision de controle, pas
+      // la suite de l'operation qui l'a provoque. Laisser un meme acteur faire
+      // les deux reviendrait a lui permettre de forcer indefiniment un
+      // remboursement que le fournisseur refuse — sans qu'aucun tiers ne
+      // l'examine. Le registre garde trace des deux acteurs.
+      if (reopenedBy && refund.requestedBy && refund.requestedBy === reopenedBy) {
+        throw new ForbiddenException({
+          error: 'SEGREGATION_OF_DUTIES',
+          message:
+            'La cle qui a demande ce remboursement ne peut pas lever son refus. ' +
+            'Un second acteur habilite refunds:approve doit intervenir.',
         });
       }
 

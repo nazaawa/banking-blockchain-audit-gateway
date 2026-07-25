@@ -11,7 +11,11 @@ import { CaseStatus, RefundStatus } from '../src/mobile-money/enums/mobile-money
 import { RefundsService } from '../src/refunds/refunds.service';
 import { SoapClientService } from '../src/soap/soap-client.service';
 import type { AmountInWordsResult } from '../src/soap/soap.types';
-import { E2E_AUTHORIZATION } from './setup-e2e';
+import {
+  E2E_APPROVER_AUTHORIZATION,
+  E2E_AUTHORIZATION,
+  E2E_SELF_APPROVER_AUTHORIZATION,
+} from './setup-e2e';
 
 const soapSuccess = (): AmountInWordsResult => ({
   amountInWords: 'mille deux cent cinquante',
@@ -199,9 +203,10 @@ describe('Remboursement (e2e)', () => {
       const { reference } = await withDebt(1250.75, 10.13);
       await requestRefund(reference).expect(200);
 
+      // La reouverture releve d'un second acteur, habilite `refunds:approve`.
       const reopened = await request(app.getHttpServer())
         .post(`/api/v1/transfers/${reference}/refund/reopen`)
-        .set('Authorization', E2E_AUTHORIZATION)
+        .set('Authorization', E2E_APPROVER_AUTHORIZATION)
         .expect(200);
 
       expect(reopened.body.status).toBe(RefundStatus.FAILED);
@@ -212,9 +217,43 @@ describe('Remboursement (e2e)', () => {
 
       const duplicate = await request(app.getHttpServer())
         .post(`/api/v1/transfers/${reference}/refund/reopen`)
-        .set('Authorization', E2E_AUTHORIZATION)
+        .set('Authorization', E2E_APPROVER_AUTHORIZATION)
         .expect(422);
       expect(duplicate.body.error).toBe('REFUND_ALREADY_RETRYABLE');
+    });
+
+    it('REFUSE la reouverture a la cle qui a demande le remboursement', async () => {
+      const { reference } = await withDebt(1250.75, 10.13);
+      // La demande est portee par la cle qui cumule les deux habilitations.
+      await request(app.getHttpServer())
+        .post(`/api/v1/transfers/${reference}/refund`)
+        .set('Authorization', E2E_SELF_APPROVER_AUTHORIZATION)
+        .expect(200);
+
+      // Meme si elle detient l habilitation, l acteur qui a provoque le refus
+      // ne peut pas le lever : il forcerait sinon indefiniment un remboursement
+      // que le fournisseur refuse, sans qu aucun tiers ne l examine.
+      const refused = await request(app.getHttpServer())
+        .post(`/api/v1/transfers/${reference}/refund/reopen`)
+        .set('Authorization', E2E_SELF_APPROVER_AUTHORIZATION)
+        .expect(403);
+
+      expect(refused.body.error).toBe('SEGREGATION_OF_DUTIES');
+      expect((await eventsOf(reference)).map((event) => event.eventType)).not.toContain(
+        'REFUND_REOPENED',
+      );
+    });
+
+    it('REFUSE la reouverture sans habilitation d approbation', async () => {
+      const { reference } = await withDebt(1250.75, 10.13);
+      await requestRefund(reference).expect(200);
+
+      // `refunds:write` fait sortir des fonds ; `refunds:approve` leve un refus.
+      // Les confondre reviendrait a n avoir qu un seul niveau de decision.
+      await request(app.getHttpServer())
+        .post(`/api/v1/transfers/${reference}/refund/reopen`)
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(403);
     });
 
     it('rejoue une indisponibilite sans jamais rembourser deux fois', async () => {

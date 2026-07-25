@@ -51,7 +51,7 @@ export class RefundsController {
   }
 
   @Post('reopen')
-  @RequireScopes(SCOPES.refundsWrite)
+  @RequireScopes(SCOPES.refundsApprove)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Rouvrir un dossier ferme par un refus fournisseur',
@@ -63,6 +63,10 @@ export class RefundsController {
       'consigne un fait `REFUND_REOPENED` dans le registre. Sans lui, la',
       'reouverture passerait par une ecriture directe en base, invisible de la',
       'preuve.',
+      '',
+      'Habilitation `refunds:approve` requise, distincte de `refunds:write` : lever',
+      'un refus est une decision de controle, pas une operation courante. La cle',
+      'qui a demande le remboursement ne peut pas le rouvrir elle-meme.',
     ].join('\n'),
   })
   @ApiOkResponse({ type: RefundResponseDto })
