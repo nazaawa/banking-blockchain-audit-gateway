@@ -1,8 +1,7 @@
 import { Controller, Get, Param } from '@nestjs/common';
-import { ApiNotFoundResponse, ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { RequireScopes } from '../auth/decorators/scopes.decorator';
 import { SCOPES } from '../auth/scopes';
-import { ErrorResponseDto } from '../common/dto/error-response.dto';
 import { TransferParamsDto } from '../transactions/dto/transfer-params.dto';
 import { TransactionEventResponseDto } from './dto/transaction-event-response.dto';
 import type { EventChainReport } from './event-chain-verification.service';
@@ -34,20 +33,12 @@ export class TransactionEventsController {
   @Get('verification')
   @RequireScopes(SCOPES.transfersRead)
   @ApiOperation({
-    summary: 'Verifier l integrite de la chaine d evenements',
-    description: [
-      'Eprouve trois proprietes independantes :',
-      '- **contenu** : chaque document reconstruit redonne son empreinte scellee ;',
-      '- **ordre** : chaque maillon pointe vers l empreinte du precedent, et les',
-      '  rangs forment une suite continue ;',
-      '- **publication** : la preuve d inclusion mene a une racine publiee.',
-      '',
-      'Verdicts : `VERIFIED`, `PARTIALLY_ANCHORED`, `TAMPERED`, `EMPTY`,',
-      '`CHAIN_UNAVAILABLE`.',
-    ].join('\n'),
+    summary: 'Verifier l integrite de la chaine d evenements (alias historique)',
+    deprecated: true,
+    description:
+      'Alias de compatibilite. Utiliser desormais GET /transfers/{reference}/verification.',
   })
   @ApiOkResponse({ description: 'Rapport de controle maillon par maillon' })
-  @ApiNotFoundResponse({ description: 'Reference inconnue', type: ErrorResponseDto })
   async verifyChain(@Param() params: TransferParamsDto): Promise<EventChainReport> {
     return this.verification.verify(params.reference);
   }

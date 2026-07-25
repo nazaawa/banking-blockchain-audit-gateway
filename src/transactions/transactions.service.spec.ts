@@ -23,7 +23,8 @@ import { TransactionStatus } from './enums/transaction-status.enum';
 import { ReferenceGenerator } from './reference.generator';
 import { TransactionsRepository } from './transactions.repository';
 import { TransactionsService } from './transactions.service';
-import { AnchorService } from '../blockchain/anchor.service';
+import { TransactionEventsService } from '../events/transaction-events.service';
+import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { TransferXmlBuilder } from '../xml/transfer-xml.builder';
 import { XsdValidatorService } from '../xml/xsd-validator.service';
 
@@ -60,7 +61,7 @@ describe('TransactionsService', () => {
   let repository: jest.Mocked<TransactionsRepository>;
   let soapClient: jest.Mocked<SoapClientService>;
   let auditService: jest.Mocked<AuditService>;
-  let anchorService: jest.Mocked<AnchorService>;
+  let eventLedger: jest.Mocked<TransactionEventsService>;
 
   beforeEach(async () => {
     repository = {
@@ -87,11 +88,10 @@ describe('TransactionsService', () => {
       findByTransactionReference: jest.fn(async () => []),
     } as unknown as jest.Mocked<AuditService>;
 
-    anchorService = {
-      // Par defaut le scellement est transparent : les scenarios metier ne
-      // doivent pas dependre de la blockchain.
-      sealTransaction: jest.fn(async (transaction: Transaction) => transaction),
-    } as unknown as jest.Mocked<AnchorService>;
+    eventLedger = {
+      record: jest.fn(async () => ({}) as never),
+      closeCase: jest.fn(async () => null),
+    } as unknown as jest.Mocked<TransactionEventsService>;
 
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
@@ -104,7 +104,7 @@ describe('TransactionsService', () => {
         { provide: TransactionsRepository, useValue: repository },
         { provide: SoapClientService, useValue: soapClient },
         { provide: AuditService, useValue: auditService },
-        { provide: AnchorService, useValue: anchorService },
+        { provide: TransactionEventsService, useValue: eventLedger },
         {
           provide: businessConfig.KEY,
           useValue: { allowedCurrencies: ['EUR', 'USD'], maxAmount: 999_999_999.99 },
@@ -188,26 +188,29 @@ describe('TransactionsService', () => {
       );
     });
 
-    it('scelle la transaction une fois l etat terminal atteint', async () => {
+    it('consigne l ouverture puis l aboutissement dans le registre', async () => {
       const transaction = await service.initiateTransfer(validDto());
 
-      expect(anchorService.sealTransaction).toHaveBeenCalledTimes(1);
-      expect(anchorService.sealTransaction).toHaveBeenCalledWith(
-        expect.objectContaining({ status: TransactionStatus.COMPLETED }),
-      );
+      const types = eventLedger.record.mock.calls.map((call) => call[0].type);
+      expect(types).toEqual([
+        TransactionEventType.TRANSFER_INITIATED,
+        TransactionEventType.TRANSFER_COMPLETED,
+      ]);
+      // Le flux classique n a qu une jambe : l aboutissement clot le dossier.
+      expect(eventLedger.closeCase).toHaveBeenCalledTimes(1);
       expect(transaction.status).toBe(TransactionStatus.COMPLETED);
     });
 
-    it('scelle aussi une transaction en echec', async () => {
+    it('consigne aussi l echec, et clot le dossier', async () => {
       soapClient.convertAmountToWords.mockRejectedValue(
         new SoapCommunicationException('injoignable', 'NumberToDollars', false),
       );
 
       await expect(service.initiateTransfer(validDto())).rejects.toThrow();
 
-      expect(anchorService.sealTransaction).toHaveBeenCalledWith(
-        expect.objectContaining({ status: TransactionStatus.FAILED }),
-      );
+      const types = eventLedger.record.mock.calls.map((call) => call[0].type);
+      expect(types).toContain(TransactionEventType.TRANSFER_FAILED);
+      expect(eventLedger.closeCase).toHaveBeenCalledTimes(1);
     });
 
     it('conserve l IBAN complet en base — le masquage est une preoccupation de presentation', async () => {

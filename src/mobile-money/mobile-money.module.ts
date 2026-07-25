@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditModule } from '../audit/audit.module';
-import { BlockchainModule } from '../blockchain/blockchain.module';
 import { EventsModule } from '../events/events.module';
 import { SoapModule } from '../soap/soap.module';
 import { Transaction } from '../transactions/entities/transaction.entity';
@@ -21,7 +20,6 @@ import { ReconciliationService } from './reconciliation.service';
     TypeOrmModule.forFeature([Transaction, MobileMoneyWebhookEvent]),
     SoapModule,
     AuditModule,
-    BlockchainModule,
     EventsModule,
   ],
   controllers: [MobileMoneyController, MobileMoneyWebhookController, AggregatorSimulatorController],

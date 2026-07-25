@@ -29,7 +29,8 @@ import { Transaction } from './entities/transaction.entity';
 import { TransactionStatus } from './enums/transaction-status.enum';
 import { ReferenceGenerator } from './reference.generator';
 import { TransactionsRepository } from './transactions.repository';
-import { AnchorService } from '../blockchain/anchor.service';
+import { TransactionEventsService } from '../events/transaction-events.service';
+import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { TransferXmlBuilder } from '../xml/transfer-xml.builder';
 import { SCHEMAS, XsdValidatorService } from '../xml/xsd-validator.service';
 import { XsdValidationException } from '../xml/exceptions/xml.exceptions';
@@ -58,7 +59,7 @@ export class TransactionsService {
     private readonly referenceGenerator: ReferenceGenerator,
     private readonly xmlBuilder: TransferXmlBuilder,
     private readonly xsdValidator: XsdValidatorService,
-    private readonly anchorService: AnchorService,
+    private readonly events: TransactionEventsService,
     @Inject(businessConfig.KEY)
     private readonly config: ConfigType<typeof businessConfig>,
   ) {}
@@ -95,6 +96,12 @@ export class TransactionsService {
     // prise en charge par l'autre requete. La rejouer emettrait un second appel
     // SOAP pour un seul virement.
     if (!isNew) return transaction;
+
+    await this.events.record({
+      type: TransactionEventType.TRANSFER_INITIATED,
+      transaction,
+      detail: 'Virement enregistre, avant appel au back-office',
+    });
 
     return this.processTransaction(transaction, requestXml);
   }
@@ -342,8 +349,15 @@ export class TransactionsService {
         durationMs: exchange.durationMs,
       });
 
-      // Scellement : etat terminal atteint, l'empreinte peut etre figee.
-      return await this.anchorService.sealTransaction(completed);
+      await this.events.record({
+        type: TransactionEventType.TRANSFER_COMPLETED,
+        transaction: completed,
+        detail: `Back-office traite en ${exchange.durationMs} ms`,
+      });
+      // Le flux classique n'a qu'une jambe : l'aboutissement clot le dossier.
+      await this.events.closeCase(completed, 'Dossier clos apres virement abouti');
+
+      return completed;
     } catch (error) {
       return this.handleProcessingFailure(transaction, error);
     }
@@ -485,15 +499,18 @@ export class TransactionsService {
     });
   }
 
-  /**
-   * Persiste un echec puis scelle la transaction.
-   *
-   * Une transaction en echec est scellee au meme titre qu'une reussie : le motif
-   * du rejet fait partie de la piste d'audit, et sa modification ulterieure doit
-   * rester detectable.
-   */
+  /** Persiste un echec puis consigne et clot sa chaine de faits. */
   private async persistFailedTransaction(transaction: Transaction): Promise<Transaction> {
     const saved = await this.repository.save(transaction);
-    return this.anchorService.sealTransaction(saved);
+
+    await this.events.record({
+      type: TransactionEventType.TRANSFER_FAILED,
+      transaction: saved,
+      detail: saved.failureReason,
+    });
+    // Un echec est terminal : rien d'autre n'est attendu sur ce dossier.
+    await this.events.closeCase(saved, 'Dossier clos apres echec du virement');
+
+    return saved;
   }
 }

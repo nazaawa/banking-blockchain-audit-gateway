@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditModule } from '../audit/audit.module';
-import { BlockchainModule } from '../blockchain/blockchain.module';
+import { EventsModule } from '../events/events.module';
 import { SoapModule } from '../soap/soap.module';
 import { XmlModule } from '../xml/xml.module';
 import { Transaction } from './entities/transaction.entity';
@@ -16,7 +16,7 @@ import { TransactionsService } from './transactions.service';
     SoapModule,
     AuditModule,
     XmlModule,
-    BlockchainModule,
+    EventsModule,
   ],
   controllers: [TransactionsController],
   providers: [TransactionsService, TransactionsRepository, ReferenceGenerator],

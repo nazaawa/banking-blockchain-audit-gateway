@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { BlockchainModule } from '../blockchain/blockchain.module';
 import { AnchorBatch } from '../blockchain/entities/anchor-batch.entity';
-import { EvmAnchorClient } from '../blockchain/evm-anchor.client';
 import { XmlModule } from '../xml/xml.module';
 import { AppendOnlyGuardInstaller } from './append-only-guard.installer';
 import { TransactionEvent } from './entities/transaction-event.entity';
@@ -19,14 +19,17 @@ import { Transaction } from '../transactions/entities/transaction.entity';
  * scellement d'un fait pourrait declencher un fait.
  */
 @Module({
-  imports: [TypeOrmModule.forFeature([TransactionEvent, AnchorBatch, Transaction]), XmlModule],
+  imports: [
+    TypeOrmModule.forFeature([TransactionEvent, AnchorBatch, Transaction]),
+    BlockchainModule,
+    XmlModule,
+  ],
   controllers: [TransactionEventsController],
   providers: [
     AppendOnlyGuardInstaller,
     TransactionEventsService,
     TransactionEventXmlBuilder,
     EventChainVerificationService,
-    EvmAnchorClient,
   ],
   exports: [TransactionEventsService, EventChainVerificationService, TransactionEventXmlBuilder],
 })

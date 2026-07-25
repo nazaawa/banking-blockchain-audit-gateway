@@ -1,7 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import type { Repository } from 'typeorm';
-import { AnchorService } from '../blockchain/anchor.service';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
 import {
@@ -31,7 +30,6 @@ const payment = (overrides: Partial<Transaction> = {}): Transaction =>
 describe('ReconciliationService', () => {
   let service: ReconciliationService;
   let repository: jest.Mocked<Repository<Transaction>>;
-  let anchor: jest.Mocked<AnchorService>;
   let eventLedger: jest.Mocked<TransactionEventsService>;
 
   beforeEach(async () => {
@@ -39,9 +37,6 @@ describe('ReconciliationService', () => {
       save: jest.fn(async (value: Transaction) => value),
       find: jest.fn(async () => []),
     } as unknown as jest.Mocked<Repository<Transaction>>;
-    anchor = {
-      sealTransaction: jest.fn(async (value: Transaction) => value),
-    } as unknown as jest.Mocked<AnchorService>;
     eventLedger = {
       record: jest.fn(async () => ({}) as never),
       closeCase: jest.fn(async () => null),
@@ -51,7 +46,6 @@ describe('ReconciliationService', () => {
       providers: [
         ReconciliationService,
         { provide: getRepositoryToken(Transaction), useValue: repository },
-        { provide: AnchorService, useValue: anchor },
         { provide: TransactionEventsService, useValue: eventLedger },
       ],
     }).compile();
@@ -63,21 +57,21 @@ describe('ReconciliationService', () => {
 
     expect(result.reconciliationStatus).toBe(ReconciliationStatus.MATCHED);
     expect(result.reconciledAt).toBeInstanceOf(Date);
-    expect(anchor.sealTransaction).toHaveBeenCalledTimes(1);
+    expect(eventLedger.closeCase).toHaveBeenCalledTimes(1);
     expect(eventLedger.closeCase).toHaveBeenCalledWith(
       result,
       'Dossier clos apres rapprochement conforme',
     );
   });
 
-  it('scelle un ecart de montant au meme titre qu une concordance', async () => {
+  it('consigne un ecart de montant mais laisse le dossier ouvert', async () => {
     const result = await service.reconcile(payment({ aggregatorAmount: 1250.76 }));
 
     expect(result.reconciliationStatus).toBe(ReconciliationStatus.MISMATCH);
     expect(result.reconciliationReason).toContain('montant');
-    // Le rapprochement est tranche : l'issue est definitive et doit etre
-    // opposable. Ne pas la sceller privait de preuve le dossier litigieux.
-    expect(anchor.sealTransaction).toHaveBeenCalledTimes(1);
+    // Le verdict est consigne — le litige est donc opposable — mais la cloture
+    // n'a pas lieu : la dette subsiste tant qu'aucun remboursement n'aboutit.
+    expect(eventLedger.record).toHaveBeenCalledTimes(1);
     expect(eventLedger.closeCase).not.toHaveBeenCalled();
   });
 
@@ -89,8 +83,8 @@ describe('ReconciliationService', () => {
     await service.reconcile(alreadyMatched);
 
     expect(eventLedger.record).not.toHaveBeenCalled();
+    // La cloture est idempotente cote registre : la rappeler ne duplique rien.
     expect(eventLedger.closeCase).toHaveBeenCalledTimes(1);
-    expect(anchor.sealTransaction).toHaveBeenCalledWith(alreadyMatched);
   });
 
   it('laisse en attente une transaction dont la banque n a pas termine', async () => {
@@ -99,6 +93,6 @@ describe('ReconciliationService', () => {
     );
 
     expect(result.reconciliationStatus).toBe(ReconciliationStatus.PENDING);
-    expect(anchor.sealTransaction).not.toHaveBeenCalled();
+    expect(eventLedger.closeCase).not.toHaveBeenCalled();
   });
 });

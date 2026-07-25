@@ -24,8 +24,8 @@ import {
 import { RequireScopes } from '../auth/decorators/scopes.decorator';
 import { SCOPES } from '../auth/scopes';
 import { AuditLog } from '../audit/entities/audit-log.entity';
-import type { IntegrityReport } from '../blockchain/integrity-verification.service';
-import { IntegrityVerificationService } from '../blockchain/integrity-verification.service';
+import type { EventChainReport } from '../events/event-chain-verification.service';
+import { EventChainVerificationService } from '../events/event-chain-verification.service';
 import { ErrorResponseDto } from '../common/dto/error-response.dto';
 import { CreateTransferDto } from './dto/create-transfer.dto';
 import { PaginatedTransfersDto, QueryTransfersDto } from './dto/query-transfers.dto';
@@ -38,7 +38,7 @@ import { TransactionsService } from './transactions.service';
 export class TransactionsController {
   constructor(
     private readonly transactionsService: TransactionsService,
-    private readonly verificationService: IntegrityVerificationService,
+    private readonly verificationService: EventChainVerificationService,
   ) {}
 
   @Post()
@@ -122,20 +122,25 @@ export class TransactionsController {
   @ApiOperation({
     summary: 'Verifier l integrite d un virement',
     description: [
-      'Reconstruit le document XML scelle a partir de la base, le revalide contre',
-      'son XSD, recalcule son empreinte avec le sel d origine, puis confronte la',
-      'preuve d inclusion a la racine de Merkle publiee sur la blockchain.',
+      'Le registre append-only remplace le scellement d instantane : la preuve ne',
+      'porte plus sur un etat courant mais sur la suite des faits.',
       '',
-      'Verdicts possibles : `VERIFIED` (integrite confirmee jusqu a la chaine),',
-      '`PENDING_ANCHOR` (donnees intactes, ancrage pas encore effectue),',
-      '`TAMPERED` (alteration detectee), `NOT_SEALED`, `CHAIN_UNAVAILABLE`.',
+      'Quatre proprietes independantes sont eprouvees :',
+      '- **contenu** : chaque document reconstruit redonne son empreinte scellee ;',
+      '- **ordre** : chaque maillon pointe vers le precedent, rangs continus ;',
+      '- **exhaustivite** : la cloture declare le total, fermant la troncature de queue ;',
+      '- **coherence** : la ligne `transactions` correspond encore a ce que',
+      '  l ouverture a consigne — c est ce controle qui detecte un IBAN modifie.',
+      '',
+      'Verdicts : `VERIFIED`, `PARTIALLY_ANCHORED`, `TAMPERED`, `EMPTY`,',
+      '`CHAIN_UNAVAILABLE`.',
     ].join('\n'),
   })
-  @ApiOkResponse({ description: 'Rapport de controle detaille' })
+  @ApiOkResponse({ description: 'Rapport de controle maillon par maillon' })
   @ApiNotFoundResponse({ description: 'Reference inconnue', type: ErrorResponseDto })
-  async verifyIntegrity(@Param() params: TransferParamsDto): Promise<IntegrityReport> {
-    const transaction = await this.transactionsService.findByReference(params.reference);
-    return this.verificationService.verify(transaction);
+  async verifyIntegrity(@Param() params: TransferParamsDto): Promise<EventChainReport> {
+    await this.transactionsService.findByReference(params.reference);
+    return this.verificationService.verify(params.reference);
   }
 
   @Get(':reference/audit')

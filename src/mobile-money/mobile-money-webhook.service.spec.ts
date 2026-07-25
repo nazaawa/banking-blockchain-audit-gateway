@@ -1,5 +1,4 @@
 import type { Repository, UpdateResult } from 'typeorm';
-import { AnchorService } from '../blockchain/anchor.service';
 import { AuditService } from '../audit/audit.service';
 import { SoapClientService } from '../soap/soap-client.service';
 import type { AmountInWordsResult } from '../soap/soap.types';
@@ -62,7 +61,6 @@ describe('MobileMoneyWebhookService', () => {
   let soap: jest.Mocked<SoapClientService>;
   let audit: jest.Mocked<AuditService>;
   let reconciliation: jest.Mocked<ReconciliationService>;
-  let anchor: jest.Mocked<AnchorService>;
   let eventLedger: jest.Mocked<TransactionEventsService>;
 
   beforeEach(() => {
@@ -98,10 +96,6 @@ describe('MobileMoneyWebhookService', () => {
       }),
     } as unknown as jest.Mocked<ReconciliationService>;
 
-    anchor = {
-      sealTransaction: jest.fn(async (value: Transaction) => value),
-    } as unknown as jest.Mocked<AnchorService>;
-
     eventLedger = {
       record: jest.fn(async () => ({}) as never),
       closeCase: jest.fn(async () => null),
@@ -116,7 +110,6 @@ describe('MobileMoneyWebhookService', () => {
       soap,
       audit,
       reconciliation,
-      anchor,
       eventLedger,
       { webhookSecret: 'test-secret' } as never,
     );

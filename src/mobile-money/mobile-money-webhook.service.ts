@@ -9,7 +9,6 @@ import type { ConfigType } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { QueryFailedError, Repository } from 'typeorm';
-import { AnchorService } from '../blockchain/anchor.service';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { AuditService } from '../audit/audit.service';
@@ -54,7 +53,6 @@ export class MobileMoneyWebhookService {
     private readonly soapClient: SoapClientService,
     private readonly auditService: AuditService,
     private readonly reconciliation: ReconciliationService,
-    private readonly anchorService: AnchorService,
     private readonly eventLedger: TransactionEventsService,
     @Inject(mobileMoneyConfig.KEY)
     private readonly config: ConfigType<typeof mobileMoneyConfig>,
@@ -88,12 +86,9 @@ export class MobileMoneyWebhookService {
       event.failureReason = null;
       await this.events.save(event);
 
-      // Point de convergence unique du scellement : refus operateur, ecart de
-      // montant, echec bancaire ou rapprochement conforme aboutissent tous ici.
-      // Le placer sur chaque branche reviendrait a rouvrir, a chaque evolution,
-      // la breche que ce correctif ferme. `sealTransaction` est idempotent et
-      // ignore de lui-meme les etats non terminaux.
-      return await this.anchorService.sealTransaction(result);
+      // Le registre append-only porte desormais la preuve : plus rien a sceller
+      // ici, chaque fait a ete consigne et scelle a l'endroit ou il s'est produit.
+      return result;
     } catch (error) {
       // Relacher la reclamation est indispensable : un evenement laisse en
       // PROCESSING ne serait plus jamais retraite. FAILED est re-reclamable.

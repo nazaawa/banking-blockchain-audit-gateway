@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { AnchorService } from '../blockchain/anchor.service';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { amountsMatch, currenciesMatch } from './amount.util';
@@ -21,7 +20,6 @@ export class ReconciliationService {
   constructor(
     @InjectRepository(Transaction)
     private readonly transactions: Repository<Transaction>,
-    private readonly anchorService: AnchorService,
     private readonly events: TransactionEventsService,
   ) {}
 
@@ -30,10 +28,10 @@ export class ReconciliationService {
 
     // Rejeu apres un incident local survenu entre le verdict et la cloture :
     // ne pas recreer RECONCILIATION_MATCHED, mais reparer idempotemment la
-    // preuve de synthese puis le scellement eventuellement manquant.
+    // preuve de synthese eventuellement manquante.
     if (transaction.reconciliationStatus === ReconciliationStatus.MATCHED) {
       await this.events.closeCase(transaction, 'Dossier clos apres rapprochement conforme');
-      return this.anchorService.sealTransaction(transaction);
+      return transaction;
     }
 
     if (
@@ -94,10 +92,10 @@ export class ReconciliationService {
       reconciliationStatus: reconciled.reconciliationStatus,
     });
 
-    // Le rapprochement est tranche : l'issue est figee, qu'elle soit conforme
-    // ou non. Un ecart doit etre ancre au meme titre qu'une concordance — c'est
-    // le dossier litigieux qui a le plus besoin d'une preuve opposable.
-    return this.anchorService.sealTransaction(reconciled);
+    // La concordance est close ci-dessus. Un ecart reste ouvert jusqu'a
+    // extinction de la dette envers le payeur ; seul ce futur etat final sera
+    // ancre.
+    return reconciled;
   }
 
   /** Rejoue le rapprochement des lignes devenues eligibles apres une reprise. */
