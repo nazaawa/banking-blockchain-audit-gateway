@@ -54,6 +54,7 @@ const RULES: Rule[] = [
   { key: 'AUDIT_MAX_PAYLOAD_CHARS', kind: 'int', min: 0 },
   { key: 'AUDIT_PERSIST_PAYLOADS', kind: 'boolean' },
   { key: 'SWAGGER_ENABLED', kind: 'boolean' },
+  { key: 'AUTH_ENABLED', kind: 'boolean' },
 
   { key: 'BLOCKCHAIN_ENABLED', kind: 'boolean' },
   { key: 'BLOCKCHAIN_RPC_URL', kind: 'url' },
@@ -136,6 +137,22 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
   const errors = RULES.map((rule) =>
     checkRule(rule, config[rule.key] as string | undefined),
   ).filter((error): error is string => error !== null);
+
+  const read = (key: string): string => {
+    const value = config[key];
+    return typeof value === 'string' ? value : '';
+  };
+
+  // Une API de paiement ouverte en production n'est pas un mode degrade : c'est
+  // une faute. Le demarrage doit echouer, pas se contenter d'un avertissement.
+  if (read('NODE_ENV') === 'production') {
+    if (['0', 'false', 'no', 'off'].includes(read('AUTH_ENABLED').toLowerCase())) {
+      errors.push('AUTH_ENABLED ne peut pas valoir false en production');
+    }
+    if (!read('API_KEYS').trim()) {
+      errors.push('API_KEYS est requis en production : aucune cle declaree');
+    }
+  }
 
   if (
     config.NODE_ENV === 'production' &&

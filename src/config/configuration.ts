@@ -122,6 +122,22 @@ export const anchorConfig = registerAs('anchor', () => ({
   maxRetries: toInt(process.env.ANCHOR_MAX_RETRIES, 3),
 }));
 
+export const authConfig = registerAs('auth', () => ({
+  /**
+   * `false` ouvre l'API en grand, remboursements compris. Refuse en production
+   * par la validation d'environnement.
+   */
+  enabled: toBool(process.env.AUTH_ENABLED, true),
+  /**
+   * Entrees `keyId|sha256Hex|scope1,scope2|libelle`, separees par `;`.
+   * Seules des empreintes y figurent : jamais un secret exploitable.
+   */
+  apiKeys: (process.env.API_KEYS ?? '')
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter(Boolean),
+}));
+
 export const configurations = [
   appConfig,
   databaseConfig,
@@ -129,6 +145,7 @@ export const configurations = [
   businessConfig,
   mobileMoneyConfig,
   auditConfig,
+  authConfig,
   blockchainConfig,
   anchorConfig,
 ];
