@@ -108,6 +108,13 @@ describe('maskDeep', () => {
     const masked = JSON.stringify(maskDeep({ champLibre: `compte ${IBAN_FR}` }));
     expect(masked).not.toContain(IBAN_FR);
   });
+
+  it('masque le MSISDN du payeur Mobile Money', () => {
+    const masked = maskDeep({ payerMsisdn: '+243812345678' }) as {
+      payerMsisdn: string;
+    };
+    expect(masked.payerMsisdn).toBe('+2****78');
+  });
 });
 
 describe('maskXml', () => {

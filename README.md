@@ -1,9 +1,9 @@
 # Banking Integration & Blockchain Audit Gateway
 
-Passerelle bancaire simulée qui reçoit un ordre de virement en REST/JSON, le transforme en **XML
-canonique validé par XSD**, le soumet à un **service SOAP** décrit par un WSDL, le persiste dans
-**PostgreSQL**, puis inscrit une **preuve cryptographique** sur une **blockchain** — afin que toute
-altération ultérieure des données devienne détectable.
+Passerelle bancaire simulée qui reçoit un paiement **Mobile Money**, attend la confirmation signée
+d'un agrégateur, déclenche l'intégration bancaire **SOAP**, rapproche les deux jambes dans
+**PostgreSQL**, puis inscrit une **preuve cryptographique** sur une **blockchain** uniquement lorsque
+l'état final est concordant.
 
 > La blockchain ne porte **aucun** paiement et **aucune** donnée bancaire. Elle sert de registre
 > d'audit inviolable : seule une racine de Merkle de 32 octets y est publiée, dont on ne peut rien
@@ -14,25 +14,27 @@ altération ultérieure des données devienne détectable.
 ## Chaîne de traitement
 
 ```
-POST /api/v1/transfers  (JSON)
+POST /api/v1/mobile-money/transactions
    │
-   ├─ 1. Validation          IBAN (ISO 13616 + clé MOD 97-10), montant, devise, libellé SEPA
-   ├─ 2. Règles métier       devise autorisée, plafond, comptes distincts
-   ├─ 3. Transformation XML  document canonique TransferRequest
-   ├─ 4. Validation XSD      transfer-request.xsd — rejet 422 si non conforme
-   ├─ 5. Idempotence         Idempotency-Key → rejeu sans nouvel appel externe
-   ├─ 6. Référence unique    TRF-YYYYMMDD-XXXXXXXX (CSPRNG, Crockford base32)
-   ├─ 7. Persistance         PostgreSQL, statut PENDING  ← AVANT tout appel externe
-   ├─ 8. Appel SOAP          NumberToDollars (WSDL local, timeout, reprises)
-   ├─ 9. Analyse XML         parseur durci → détection <soap:Fault> 1.1 / 1.2
-   ├─ 10. Statut terminal    COMPLETED ou FAILED
-   ├─ 11. Scellement         TransferRecord canonique → validé XSD → keccak256(sel ‖ document)
-   └─ 12. Audit              échanges consignés, payloads XML masqués
+   ├─ 1. Validation          opérateur, MSISDN E.164, IBAN, montant et devise
+   ├─ 2. Idempotence         Idempotency-Key → une seule collecte
+   ├─ 3. Agrégateur          référence AGG-*, état PENDING
+   └─→ 201 Created           aucun appel bancaire à ce stade
+
+POST /api/v1/webhooks/mobile-money
    │
-   └─→ 201 Created
+   ├─ 4. Authentification    HMAC SHA-256, comparaison en temps constant
+   ├─ 5. Déduplication       eventId unique + prise atomique de la jambe bancaire
+   ├─ 6. Confirmation        montant, devise et horodatage fournis par l'agrégateur
+   ├─ 7. Appel SOAP          uniquement après CONFIRMED
+   ├─ 8. Rapprochement       montant + devise Mobile Money == instruction bancaire
+   ├─ 9. État final          MATCHED, MISMATCH ou MANUAL_REVIEW
+   └─ 10. Scellement         uniquement MATCHED : XML final → XSD → keccak256(sel ‖ document)
+   │
+   └─→ 200 OK
 
 [asynchrone, périodique]
-   └─ Lot de N transactions → arbre de Merkle → racine publiée sur la chaîne
+   └─ Lot de N états MATCHED → arbre de Merkle → racine publiée sur la chaîne
                             → preuve d'inclusion persistée par transaction
 
 GET /api/v1/transfers/{ref}/verification
@@ -41,8 +43,10 @@ GET /api/v1/transfers/{ref}/verification
 
 Deux principes structurants :
 
-- **La transaction est enregistrée avant l'appel externe.** Si le SOAP échoue, l'API répond 502/504
-  mais renvoie la `reference` : la demande reste consultable avec le statut `FAILED`.
+- **La transaction est enregistrée avant tout appel externe.** Le SOAP ne part qu'après réception
+  d'une confirmation Mobile Money authentifiée.
+- **Un écart n'est jamais ancré.** `MISMATCH`, `FAILED` et `MANUAL_REVIEW` restent consultables et
+  auditables en base, mais ne reçoivent ni empreinte ni preuve blockchain.
 - **L'ancrage est asynchrone.** Une écriture on-chain prend de quelques secondes à plusieurs
   minutes ; l'inclure dans le cycle HTTP reproduirait le défaut que l'on évite déjà sur le SOAP.
   Le scellement, lui, est synchrone et instantané.
@@ -62,7 +66,7 @@ Deux principes structurants :
 | Blockchain | Chaîne EVM locale (Anvil / nœud Hardhat) + contrat Solidity |
 | Client chaîne | `ethers` v6 |
 | Documentation | Swagger / OpenAPI 3 |
-| Tests | Jest + Supertest — **223 tests** |
+| Tests | Jest + Supertest — **240 tests** |
 | Conteneurisation | Docker multi-stage + Docker Compose |
 
 `xmllint-wasm` a été retenu plutôt que `libxmljs` (compilation native) ou `xsd-schema-validator`
@@ -121,43 +125,35 @@ Pour travailler sans chaîne, `BLOCKCHAIN_ENABLED=false` : les transactions rest
 
 ## API
 
-### Initier un virement
+### Initier une transaction Mobile Money
 
 ```bash
-curl -X POST http://localhost:3000/api/v1/transfers \
+curl -X POST http://localhost:3000/api/v1/mobile-money/transactions \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: cmd-2026-0042' \
   -d '{
-    "debtorIban":   "fr76 3000 6000 0112 3456 7890 189",
-    "debtorName":   "Societe Kongo SARL",
+    "operator":     "MPESA",
+    "payerMsisdn":  "+243812345678",
     "creditorIban": "DE89370400440532013000",
     "creditorName": "ACME GmbH",
     "amount":       1250.75,
     "currency":     "EUR",
-    "endToEndLabel":"Facture 2026-0042"
+    "externalReference": "COMMANDE-2026-0042"
   }'
 ```
 
-`201 Created` — réponse réelle du service public DataAccess :
+La réponse `201 Created` contient une `aggregatorReference` et reste `PENDING`. Pour simuler la
+confirmation opérateur et exercer exactement le chemin webhook signé :
 
-```json
-{
-  "reference": "TRF-20260725-02AC53WQ",
-  "status": "COMPLETED",
-  "debtorIbanMasked": "FR76****0189",
-  "creditorIbanMasked": "DE89****3000",
-  "creditorName": "ACME GmbH",
-  "amount": 1250.75,
-  "currency": "EUR",
-  "amountInWords": "one thousand two hundred and fifty dollars and seventy five cents",
-  "soap": { "operation": "NumberToDollars", "durationMs": 1865, "attempts": 1 },
-  "correlationId": "6f8724f3-104b-4423-8e55-affd30d1b812",
-  "processedAt": "2026-07-25T10:30:31.748Z"
-}
+```bash
+curl -X POST \
+  http://localhost:3000/api/v1/simulator/mobile-money/payments/AGG-20260725-A1B2C3D4E5F6/confirm \
+  -H 'Content-Type: application/json' \
+  -d '{}'
 ```
 
-Les IBAN ne sont **jamais** restitués en clair : les champs s'appellent `debtorIbanMasked` /
-`creditorIbanMasked` pour que le contrat soit explicite.
+Le simulateur accepte un `amount`, une `currency` ou un statut `FAILED` pour tester les écarts et
+rejets. Le MSISDN et les IBAN sont masqués dans les réponses et les journaux.
 
 ### Vérifier l'intégrité
 
@@ -203,6 +199,12 @@ curl http://localhost:3000/api/v1/transfers/TRF-20260725-02AC53WQ/verification
 
 | Méthode | Route | Rôle |
 | --- | --- | --- |
+| `POST` | `/mobile-money/transactions` | Initie une collecte Mobile Money |
+| `GET` | `/mobile-money/transactions/{ref}` | Cycle agrégateur / banque / rapprochement |
+| `POST` | `/webhooks/mobile-money` | Callback agrégateur signé et idempotent |
+| `POST` | `/simulator/mobile-money/payments/{ref}/confirm` | Confirmation, rejet ou écart simulé |
+| `POST` | `/mobile-money/reconciliation/run` | Reprise des rapprochements éligibles |
+| `POST` | `/transfers` | Ancien flux de virement conservé pour compatibilité |
 | `GET` | `/transfers` | Liste paginée, filtres `status` et `currency` |
 | `GET` | `/transfers/{ref}` | Statut d'un virement |
 | `GET` | `/transfers/{ref}/audit` | Piste d'audit (payloads XML masqués) |
@@ -218,9 +220,9 @@ curl http://localhost:3000/api/v1/transfers/TRF-20260725-02AC53WQ/verification
 
 ### Ce qui est scellé
 
-Quand une transaction atteint un état terminal, la passerelle produit un document
-`TransferRecord` — l'état final complet, résultat de l'appel SOAP inclus — le valide contre
-`transfer-record.xsd`, puis calcule :
+Pour le flux Mobile Money, la passerelle ne produit le `TransferRecord` qu'après un rapprochement
+`MATCHED`. Ce document contient la confirmation agrégateur, le résultat SOAP et le verdict final ;
+il est validé contre `transfer-record.xsd`, puis la passerelle calcule :
 
 ```
 empreinte = keccak256( sel(32 octets) ‖ documentXmlCanonique )

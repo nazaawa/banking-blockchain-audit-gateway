@@ -1,7 +1,18 @@
 import type { CreateTransferDto } from '../transactions/dto/create-transfer.dto';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
-import { RECORD_FORMAT_VERSION, TransferXmlBuilder } from './transfer-xml.builder';
+import {
+  BankProcessingStatus,
+  MobileMoneyOperator,
+  MobileMoneyStatus,
+  PaymentChannel,
+  ReconciliationStatus,
+} from '../mobile-money/enums/mobile-money.enum';
+import {
+  MOBILE_MONEY_RECORD_FORMAT_VERSION,
+  RECORD_FORMAT_VERSION,
+  TransferXmlBuilder,
+} from './transfer-xml.builder';
 import { SCHEMAS, XsdValidatorService } from './xsd-validator.service';
 
 const dto = (overrides: Partial<CreateTransferDto> = {}): CreateTransferDto => ({
@@ -95,6 +106,29 @@ describe('TransferXmlBuilder', () => {
       expect(builder.buildTransferRecord(transaction())).toContain(
         `version="${RECORD_FORMAT_VERSION}"`,
       );
+    });
+
+    it('inclut l etat final rapproche d une transaction Mobile Money', async () => {
+      const xml = builder.buildTransferRecord(
+        transaction({
+          paymentChannel: PaymentChannel.MOBILE_MONEY,
+          mobileMoneyOperator: MobileMoneyOperator.MPESA,
+          payerMsisdn: '+243812345678',
+          aggregatorReference: 'AGG-20260725-A1B2C3D4E5F6',
+          mobileMoneyStatus: MobileMoneyStatus.CONFIRMED,
+          aggregatorAmount: 1250.75,
+          aggregatorCurrency: 'EUR',
+          mobileMoneyConfirmedAt: new Date('2026-07-25T10:12:30.000Z'),
+          bankStatus: BankProcessingStatus.COMPLETED,
+          reconciliationStatus: ReconciliationStatus.MATCHED,
+          reconciledAt: new Date('2026-07-25T10:12:34.000Z'),
+        }),
+      );
+
+      await expect(validator.validate(xml, SCHEMAS.transferRecord)).resolves.toEqual([]);
+      expect(xml).toContain(`version="${MOBILE_MONEY_RECORD_FORMAT_VERSION}"`);
+      expect(xml).toContain('<reconciliationStatus>MATCHED</reconciliationStatus>');
+      expect(xml).toContain('<confirmedAmount>1250.75</confirmedAmount>');
     });
   });
 
