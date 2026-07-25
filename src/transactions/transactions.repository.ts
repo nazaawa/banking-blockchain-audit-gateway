@@ -36,6 +36,10 @@ export class TransactionsRepository {
     return this.repository.findOne({ where: { idempotencyKey } });
   }
 
+  async findByAggregatorReference(aggregatorReference: string): Promise<Transaction | null> {
+    return this.repository.findOne({ where: { aggregatorReference } });
+  }
+
   async existsByReference(reference: string): Promise<boolean> {
     return this.repository.exists({ where: { reference } });
   }

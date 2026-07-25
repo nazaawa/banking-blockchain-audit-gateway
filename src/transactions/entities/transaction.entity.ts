@@ -8,6 +8,13 @@ import {
   VersionColumn,
 } from 'typeorm';
 import { AnchorStatus } from '../../blockchain/enums/anchor-status.enum';
+import {
+  BankProcessingStatus,
+  MobileMoneyOperator,
+  MobileMoneyStatus,
+  PaymentChannel,
+  ReconciliationStatus,
+} from '../../mobile-money/enums/mobile-money.enum';
 import { TransactionStatus } from '../enums/transaction-status.enum';
 
 /**
@@ -27,6 +34,7 @@ const numericTransformer = {
 @Entity('transactions')
 @Index('idx_transactions_status', ['status'])
 @Index('idx_transactions_created_at', ['createdAt'])
+@Index('idx_transactions_reconciliation', ['paymentChannel', 'reconciliationStatus'])
 export class Transaction {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -44,6 +52,14 @@ export class Transaction {
 
   @Column({ type: 'enum', enum: TransactionStatus, default: TransactionStatus.PENDING })
   status!: TransactionStatus;
+
+  @Column({
+    name: 'payment_channel',
+    type: 'enum',
+    enum: PaymentChannel,
+    default: PaymentChannel.LEGACY_TRANSFER,
+  })
+  paymentChannel!: PaymentChannel;
 
   @Column({ name: 'debtor_iban', type: 'varchar', length: 34 })
   debtorIban!: string;
@@ -96,6 +112,76 @@ export class Transaction {
   /** Horodatage de fin de traitement (succes ou echec definitif). */
   @Column({ name: 'processed_at', type: 'timestamptz', nullable: true })
   processedAt!: Date | null;
+
+  // ---------------------------------------------------------------------------
+  // Cycle de vie Mobile Money
+  // ---------------------------------------------------------------------------
+
+  @Column({
+    name: 'mobile_money_operator',
+    type: 'enum',
+    enum: MobileMoneyOperator,
+    nullable: true,
+  })
+  mobileMoneyOperator!: MobileMoneyOperator | null;
+
+  @Column({ name: 'payer_msisdn', type: 'varchar', length: 16, nullable: true })
+  payerMsisdn!: string | null;
+
+  @Column({
+    name: 'aggregator_reference',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    unique: true,
+  })
+  aggregatorReference!: string | null;
+
+  @Column({
+    name: 'mobile_money_status',
+    type: 'enum',
+    enum: MobileMoneyStatus,
+    nullable: true,
+  })
+  mobileMoneyStatus!: MobileMoneyStatus | null;
+
+  @Column({
+    name: 'bank_status',
+    type: 'enum',
+    enum: BankProcessingStatus,
+    nullable: true,
+  })
+  bankStatus!: BankProcessingStatus | null;
+
+  @Column({
+    name: 'reconciliation_status',
+    type: 'enum',
+    enum: ReconciliationStatus,
+    nullable: true,
+  })
+  reconciliationStatus!: ReconciliationStatus | null;
+
+  @Column({
+    name: 'aggregator_amount',
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    transformer: numericTransformer,
+    nullable: true,
+  })
+  aggregatorAmount!: number | null;
+
+  @Column({ name: 'aggregator_currency', type: 'char', length: 3, nullable: true })
+  aggregatorCurrency!: string | null;
+
+  @Column({ name: 'mobile_money_confirmed_at', type: 'timestamptz', nullable: true })
+  mobileMoneyConfirmedAt!: Date | null;
+
+  @Column({ name: 'reconciled_at', type: 'timestamptz', nullable: true })
+  reconciledAt!: Date | null;
+
+  @Column({ name: 'reconciliation_reason', type: 'varchar', length: 512, nullable: true })
+  reconciliationReason!: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

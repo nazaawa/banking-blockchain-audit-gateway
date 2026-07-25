@@ -42,6 +42,15 @@ const RULES: Rule[] = [
   { key: 'SOAP_RETRY_DELAY_MS', kind: 'int', min: 0 },
   { key: 'SOAP_MAX_RESPONSE_BYTES', kind: 'int', min: 1024 },
   { key: 'TRANSFER_MAX_AMOUNT', kind: 'float', min: 0 },
+  {
+    key: 'MOBILE_MONEY_SETTLEMENT_IBAN',
+    kind: 'pattern',
+    pattern: /^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$/,
+    expected: 'un IBAN sans espaces',
+  },
+  { key: 'MOBILE_MONEY_SETTLEMENT_NAME', kind: 'string' },
+  { key: 'MOBILE_MONEY_WEBHOOK_SECRET', kind: 'string', secret: true },
+  { key: 'MOBILE_MONEY_SIMULATOR_ENABLED', kind: 'boolean' },
   { key: 'AUDIT_MAX_PAYLOAD_CHARS', kind: 'int', min: 0 },
   { key: 'AUDIT_PERSIST_PAYLOADS', kind: 'boolean' },
   { key: 'SWAGGER_ENABLED', kind: 'boolean' },
@@ -127,6 +136,14 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
   const errors = RULES.map((rule) =>
     checkRule(rule, config[rule.key] as string | undefined),
   ).filter((error): error is string => error !== null);
+
+  if (
+    config.NODE_ENV === 'production' &&
+    (!config.MOBILE_MONEY_WEBHOOK_SECRET ||
+      config.MOBILE_MONEY_WEBHOOK_SECRET === 'local-demo-webhook-secret')
+  ) {
+    errors.push('MOBILE_MONEY_WEBHOOK_SECRET doit etre un secret explicite en production');
+  }
 
   if (errors.length > 0) {
     throw new Error(

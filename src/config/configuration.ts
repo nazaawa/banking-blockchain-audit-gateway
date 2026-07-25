@@ -74,6 +74,21 @@ export const businessConfig = registerAs('business', () => ({
   maxAmount: toFloat(process.env.TRANSFER_MAX_AMOUNT, 999_999_999.99),
 }));
 
+export const mobileMoneyConfig = registerAs('mobileMoney', () => ({
+  /**
+   * Compte technique credite par l'agregateur avant l'instruction bancaire.
+   * Il remplace le compte donneur d'ordre saisi dans l'ancien flux.
+   */
+  settlementIban: process.env.MOBILE_MONEY_SETTLEMENT_IBAN ?? 'FR7630006000011234567890189',
+  settlementName: process.env.MOBILE_MONEY_SETTLEMENT_NAME ?? 'Mobile Money Settlement',
+  /** Secret partage utilise pour authentifier les callbacks HMAC SHA-256. */
+  webhookSecret: process.env.MOBILE_MONEY_WEBHOOK_SECRET ?? 'local-demo-webhook-secret',
+  simulatorEnabled: toBool(
+    process.env.MOBILE_MONEY_SIMULATOR_ENABLED,
+    process.env.NODE_ENV !== 'production',
+  ),
+}));
+
 export const auditConfig = registerAs('audit', () => ({
   maxPayloadChars: toInt(process.env.AUDIT_MAX_PAYLOAD_CHARS, 8000),
   persistPayloads: toBool(process.env.AUDIT_PERSIST_PAYLOADS, true),
@@ -112,6 +127,7 @@ export const configurations = [
   databaseConfig,
   soapConfig,
   businessConfig,
+  mobileMoneyConfig,
   auditConfig,
   blockchainConfig,
   anchorConfig,
