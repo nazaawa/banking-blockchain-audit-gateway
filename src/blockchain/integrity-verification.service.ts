@@ -142,7 +142,17 @@ export class IntegrityVerificationService {
     }
 
     // ---- 3. Comparaison des empreintes ------------------------------------
-    const recomputed = computeFingerprint(transaction.fingerprintSalt, recordXml);
+    let recomputed: string;
+    try {
+      recomputed = computeFingerprint(transaction.fingerprintSalt, recordXml);
+    } catch (error) {
+      checks.fingerprintMatches = false;
+      findings.push(
+        `ALTERATION DETECTEE : les donnees de scellement sont invalides ` +
+          `(${error instanceof Error ? error.message : 'format inconnu'}).`,
+      );
+      return report(IntegrityVerdict.TAMPERED);
+    }
     checks.fingerprintMatches = recomputed.toLowerCase() === transaction.fingerprint.toLowerCase();
 
     if (!checks.fingerprintMatches) {

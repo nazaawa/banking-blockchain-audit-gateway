@@ -1,8 +1,8 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
-import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Not, Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, In, QueryRunner, Repository } from 'typeorm';
 import { anchorConfig, blockchainConfig } from '../config/configuration';
 import { SCHEMAS, XsdValidatorService } from '../xml/xsd-validator.service';
 import { RECORD_FORMAT_VERSION, TransferXmlBuilder } from '../xml/transfer-xml.builder';
@@ -22,6 +22,13 @@ export interface BatchOutcome {
 }
 
 const ANCHOR_JOB = 'anchor-pending-transactions';
+/** Verrou PostgreSQL partage par toutes les instances de la passerelle. */
+const ANCHOR_ADVISORY_LOCK_ID = 1_111_577_675;
+
+interface ClaimedBatch {
+  batch: AnchorBatch;
+  transactions: Transaction[];
+}
 
 /**
  * Scellement des transactions et ancrage par lots sur la blockchain.
@@ -51,6 +58,8 @@ export class AnchorService implements OnModuleInit {
     private readonly transactions: Repository<Transaction>,
     @InjectRepository(AnchorBatch)
     private readonly batches: Repository<AnchorBatch>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
     private readonly xmlBuilder: TransferXmlBuilder,
     private readonly xsdValidator: XsdValidatorService,
     private readonly client: EvmAnchorClient,
@@ -153,108 +162,293 @@ export class AnchorService implements OnModuleInit {
     if (this.running) return { batch: null, anchored: 0, reason: 'ALREADY_RUNNING' };
 
     this.running = true;
+    let lock: QueryRunner | null = null;
     try {
-      const pending = await this.transactions.find({
-        where: { anchorStatus: AnchorStatus.PENDING, fingerprint: Not(IsNull()) },
-        order: { sealedAt: 'ASC' },
-        take: this.config.batchMaxSize,
-      });
+      lock = await this.acquireDistributedLock();
+      if (!lock) return { batch: null, anchored: 0, reason: 'ALREADY_RUNNING' };
 
-      if (pending.length === 0) return { batch: null, anchored: 0, reason: 'NOTHING_TO_ANCHOR' };
+      const claimed = await this.findOrCreateBatch();
+      if (!claimed) return { batch: null, anchored: 0, reason: 'NOTHING_TO_ANCHOR' };
 
-      return await this.anchorTransactions(pending);
+      return await this.anchorTransactions(claimed.batch, claimed.transactions);
     } finally {
-      this.running = false;
+      try {
+        if (lock) await this.releaseDistributedLock(lock);
+      } finally {
+        this.running = false;
+      }
     }
   }
 
-  private async anchorTransactions(pending: Transaction[]): Promise<BatchOutcome> {
-    // L'ordre des feuilles fixe l'indice de chaque transaction : il est fige ici
-    // et persiste, sinon les preuves deviendraient invalides.
+  /**
+   * Recupere d'abord un lot interrompu, puis constitue un nouveau lot si besoin.
+   *
+   * La constitution est transactionnelle et verrouille les lignes avec
+   * `SKIP LOCKED` : meme sans le verrou consultatif, deux travailleurs ne
+   * peuvent pas rattacher la meme transaction a deux lots.
+   */
+  private async findOrCreateBatch(): Promise<ClaimedBatch | null> {
+    const resumable = await this.findResumableBatch();
+    if (resumable) return resumable;
+
+    return this.dataSource.transaction(async (manager) => {
+      const transactions = manager.getRepository(Transaction);
+      const batches = manager.getRepository(AnchorBatch);
+      const pending = await transactions
+        .createQueryBuilder('transaction')
+        .setLock('pessimistic_write')
+        .setOnLocked('skip_locked')
+        .where('transaction.anchorStatus = :status', { status: AnchorStatus.PENDING })
+        .andWhere('transaction.fingerprint IS NOT NULL')
+        .andWhere('transaction.batchId IS NULL')
+        .orderBy('transaction.sealedAt', 'ASC')
+        .take(this.config.batchMaxSize)
+        .getMany();
+
+      if (pending.length === 0) return null;
+
+      const leaves = pending.map((transaction) => toLeaf(transaction.fingerprint as string));
+      const tree = buildMerkleTree(leaves);
+      const batch = await batches.save(
+        batches.create({
+          status: BatchStatus.PENDING,
+          merkleRoot: tree.root,
+          leafCount: pending.length,
+          chainId: String(this.chain.chainId),
+          contractAddress: this.chain.contractAddress,
+          attempts: 0,
+        }),
+      );
+
+      pending.forEach((transaction, index) => {
+        transaction.batchId = batch.id;
+        transaction.leafIndex = index;
+        transaction.merkleProof = getProof(tree, index);
+      });
+      await transactions.save(pending);
+
+      return { batch, transactions: pending };
+    });
+  }
+
+  /** Retrouve un lot laisse PENDING/ANCHORING par un arret du processus. */
+  private async findResumableBatch(): Promise<ClaimedBatch | null> {
+    const candidates = await this.batches.find({
+      where: { status: In([BatchStatus.PENDING, BatchStatus.ANCHORING]) },
+      order: { createdAt: 'ASC' },
+    });
+
+    for (const batch of candidates) {
+      const transactions = await this.transactions.find({
+        where: { batchId: batch.id },
+        order: { leafIndex: 'ASC' },
+      });
+
+      if (transactions.length === batch.leafCount && transactions.length > 0) {
+        return { batch, transactions };
+      }
+
+      batch.status = BatchStatus.FAILED;
+      batch.lastError = `Lot incomplet apres reprise : ${transactions.length}/${batch.leafCount} transactions`;
+      await this.batches.save(batch);
+      if (transactions.length > 0) {
+        await this.transactions.update(
+          { id: In(transactions.map((transaction) => transaction.id)) },
+          { anchorStatus: AnchorStatus.FAILED },
+        );
+      }
+    }
+
+    return null;
+  }
+
+  private async anchorTransactions(
+    batch: AnchorBatch,
+    pending: Transaction[],
+  ): Promise<BatchOutcome> {
     const leaves = pending.map((transaction) => toLeaf(transaction.fingerprint as string));
     const tree = buildMerkleTree(leaves);
 
-    let batch = await this.batches.save(
-      this.batches.create({
-        status: BatchStatus.PENDING,
-        merkleRoot: tree.root,
-        leafCount: pending.length,
-        chainId: String(this.chain.chainId),
-        contractAddress: this.chain.contractAddress,
-        attempts: 0,
-      }),
-    );
+    if (tree.root.toLowerCase() !== batch.merkleRoot.toLowerCase()) {
+      return this.recordBatchFailure(
+        batch,
+        pending,
+        'Les empreintes du lot ne correspondent plus a sa racine de Merkle',
+        true,
+      );
+    }
 
-    // Rattachement avant emission : si le processus s'arrete pendant l'ancrage,
-    // les transactions ne repartent pas dans un second lot au redemarrage.
-    pending.forEach((transaction, index) => {
-      transaction.batchId = batch.id;
-      transaction.leafIndex = index;
-      transaction.merkleProof = getProof(tree, index);
-    });
-    await this.transactions.save(pending);
+    // Apres epuisement du budget, une derniere lecture permet de recuperer une
+    // transaction deja minee avant un arret, sans emettre une nouvelle ecriture.
+    if (batch.attempts >= this.config.maxRetries) {
+      try {
+        const onChain = await this.client.getBatch(batch.id);
+        if (onChain) return this.finalizeRecoveredBatch(batch, pending, onChain);
+      } catch {
+        // Le budget est deja epuise : l'indisponibilite est consignée ci-dessous.
+      }
+      return this.recordBatchFailure(
+        batch,
+        pending,
+        `Nombre maximal de tentatives atteint (${this.config.maxRetries})`,
+        true,
+      );
+    }
 
     batch.status = BatchStatus.ANCHORING;
     batch.attempts += 1;
     batch = await this.batches.save(batch);
 
     try {
+      const existing = await this.client.getBatch(batch.id);
+      if (existing) return this.finalizeRecoveredBatch(batch, pending, existing);
+
       const receipt = await this.client.anchorBatch(batch.id, tree.root, pending.length);
-
-      batch.status = BatchStatus.ANCHORED;
-      batch.txHash = receipt.txHash;
-      batch.blockNumber = receipt.blockNumber;
-      batch.gasUsed = receipt.gasUsed;
-      batch.anchoredAt = new Date();
-      batch.lastError = null;
-      batch = await this.batches.save(batch);
-
-      await this.transactions.update(
-        { id: In(pending.map((transaction) => transaction.id)) },
-        { anchorStatus: AnchorStatus.ANCHORED },
-      );
-
-      this.logger.log({
-        event: 'anchor.batch.anchored',
-        batchId: batch.id,
-        merkleRoot: tree.root,
-        leafCount: pending.length,
+      return this.finalizeBatch(batch, pending, {
         txHash: receipt.txHash,
         blockNumber: receipt.blockNumber,
         gasUsed: receipt.gasUsed,
+        chainId: receipt.chainId,
+        contractAddress: receipt.contractAddress,
+        anchoredAt: new Date(),
       });
-
-      return { batch, anchored: pending.length };
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'erreur inconnue';
-      const exhausted = batch.attempts >= this.config.maxRetries;
+      return this.recordBatchFailure(batch, pending, reason);
+    }
+  }
+
+  private async finalizeRecoveredBatch(
+    batch: AnchorBatch,
+    pending: Transaction[],
+    onChain: {
+      merkleRoot: string;
+      leafCount: number;
+      anchoredAt: Date;
+    },
+  ): Promise<BatchOutcome> {
+    if (
+      onChain.merkleRoot.toLowerCase() !== batch.merkleRoot.toLowerCase() ||
+      onChain.leafCount !== batch.leafCount
+    ) {
+      return this.recordBatchFailure(
+        batch,
+        pending,
+        'Le lot existant sur la chaine ne correspond pas au lot persiste',
+        true,
+      );
+    }
+
+    return this.finalizeBatch(batch, pending, {
+      anchoredAt: onChain.anchoredAt,
+    });
+  }
+
+  /** Rend atomiques le statut du lot et celui de toutes ses transactions. */
+  private async finalizeBatch(
+    batch: AnchorBatch,
+    pending: Transaction[],
+    chainData: {
+      txHash?: string;
+      blockNumber?: string;
+      gasUsed?: string;
+      chainId?: string;
+      contractAddress?: string;
+      anchoredAt: Date;
+    },
+  ): Promise<BatchOutcome> {
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const batches = manager.getRepository(AnchorBatch);
+      const transactions = manager.getRepository(Transaction);
+
+      batch.status = BatchStatus.ANCHORED;
+      batch.txHash = chainData.txHash ?? batch.txHash;
+      batch.blockNumber = chainData.blockNumber ?? batch.blockNumber;
+      batch.gasUsed = chainData.gasUsed ?? batch.gasUsed;
+      batch.chainId = chainData.chainId ?? batch.chainId;
+      batch.contractAddress = chainData.contractAddress ?? batch.contractAddress;
+      batch.anchoredAt = chainData.anchoredAt;
+      batch.lastError = null;
+      const anchored = await batches.save(batch);
+
+      await transactions.update(
+        { id: In(pending.map((transaction) => transaction.id)) },
+        { anchorStatus: AnchorStatus.ANCHORED },
+      );
+      return anchored;
+    });
+
+    this.logger.log({
+      event: 'anchor.batch.anchored',
+      batchId: saved.id,
+      merkleRoot: saved.merkleRoot,
+      leafCount: saved.leafCount,
+      txHash: saved.txHash,
+      blockNumber: saved.blockNumber,
+      gasUsed: saved.gasUsed,
+    });
+
+    return { batch: saved, anchored: pending.length };
+  }
+
+  private async recordBatchFailure(
+    batch: AnchorBatch,
+    pending: Transaction[],
+    reason: string,
+    forceFailure = false,
+  ): Promise<BatchOutcome> {
+    const exhausted = forceFailure || batch.attempts >= this.config.maxRetries;
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const batches = manager.getRepository(AnchorBatch);
+      const transactions = manager.getRepository(Transaction);
 
       batch.status = exhausted ? BatchStatus.FAILED : BatchStatus.PENDING;
       batch.lastError = reason.slice(0, 1024);
-      batch = await this.batches.save(batch);
+      const failed = await batches.save(batch);
 
-      // Reprise : les transactions redeviennent eligibles a un nouveau lot.
-      // Abandon definitif : l'empreinte reste exploitable hors chaine.
-      await this.transactions.update(
-        { id: In(pending.map((transaction) => transaction.id)) },
-        exhausted
-          ? { anchorStatus: AnchorStatus.FAILED }
-          : {
-              anchorStatus: AnchorStatus.PENDING,
-              batchId: null,
-              leafIndex: null,
-              merkleProof: null,
-            },
-      );
+      if (exhausted) {
+        await transactions.update(
+          { id: In(pending.map((transaction) => transaction.id)) },
+          { anchorStatus: AnchorStatus.FAILED },
+        );
+      }
+      return failed;
+    });
 
-      this.logger.error({
-        event: exhausted ? 'anchor.batch.abandoned' : 'anchor.batch.retry_scheduled',
-        batchId: batch.id,
-        attempts: batch.attempts,
-        reason,
-      });
+    this.logger.error({
+      event: exhausted ? 'anchor.batch.abandoned' : 'anchor.batch.retry_scheduled',
+      batchId: saved.id,
+      attempts: saved.attempts,
+      reason,
+    });
 
-      return { batch, anchored: 0, reason };
+    return { batch: saved, anchored: 0, reason };
+  }
+
+  /** Verrou session PostgreSQL : couvre aussi les appels RPC hors transaction. */
+  private async acquireDistributedLock(): Promise<QueryRunner | null> {
+    const runner = this.dataSource.createQueryRunner();
+    await runner.connect();
+
+    try {
+      const rows = (await runner.query('SELECT pg_try_advisory_lock($1) AS acquired', [
+        ANCHOR_ADVISORY_LOCK_ID,
+      ])) as Array<{ acquired: boolean }>;
+
+      if (rows[0]?.acquired) return runner;
+      await runner.release();
+      return null;
+    } catch (error) {
+      await runner.release();
+      throw error;
+    }
+  }
+
+  private async releaseDistributedLock(runner: QueryRunner): Promise<void> {
+    try {
+      await runner.query('SELECT pg_advisory_unlock($1)', [ANCHOR_ADVISORY_LOCK_ID]);
+    } finally {
+      await runner.release();
     }
   }
 

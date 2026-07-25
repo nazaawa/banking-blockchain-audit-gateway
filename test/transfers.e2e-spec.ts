@@ -5,6 +5,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { EvmAnchorClient } from '../src/blockchain/evm-anchor.client';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import {
   SoapCommunicationException,
@@ -63,6 +64,20 @@ describe('Transfers (e2e)', () => {
       // deterministes, y compris pour les scenarios de faute et de timeout.
       .overrideProvider(SoapClientService)
       .useValue({ convertAmountToWords, isReady: async () => true })
+      .overrideProvider(EvmAnchorClient)
+      .useValue({
+        isReady: () => Promise.resolve(true),
+        getBatch: () => Promise.resolve(null),
+        anchorBatch: () =>
+          Promise.resolve({
+            txHash: `0x${'ab'.repeat(32)}`,
+            blockNumber: '1',
+            gasUsed: '100000',
+            chainId: '31337',
+            contractAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+          }),
+        verifyInclusion: () => Promise.resolve(true),
+      })
       .compile();
 
     app = moduleRef.createNestApplication();

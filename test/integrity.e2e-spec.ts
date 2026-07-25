@@ -322,15 +322,76 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
       expect(outcome.body.anchored).toBe(0);
 
       const retried = await rowOf(reference);
-      // Reprise possible : ni ancree, ni perdue.
+      // Le rattachement au lot reste stable : une reprise ne peut pas publier
+      // une seconde preuve sous un nouvel identifiant.
       expect(retried.anchor_status).toBe('PENDING');
-      expect(retried.batch_id).toBeNull();
+      expect(retried.batch_id).toBe(outcome.body.batchId);
 
       chain.available = true;
       const recovery = await request(app.getHttpServer())
         .post('/api/v1/anchors/batches')
         .expect(200);
       expect(recovery.body.anchored).toBe(1);
+      expect(recovery.body.batchId).toBe(outcome.body.batchId);
+
+      const batches: unknown = await dataSource.query(
+        'SELECT id, attempts FROM anchor_batches ORDER BY created_at',
+      );
+      expect(batches).toEqual([{ id: outcome.body.batchId, attempts: 2 }]);
+    });
+
+    it('abandonne le meme lot apres epuisement du budget de reprises', async () => {
+      const reference = await createTransfer();
+      chain.available = false;
+
+      const batchIds: unknown[] = [];
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const outcome = await request(app.getHttpServer())
+          .post('/api/v1/anchors/batches')
+          .expect(200);
+        batchIds.push(outcome.body.batchId as unknown);
+      }
+
+      expect(new Set(batchIds).size).toBe(1);
+      const row = await rowOf(reference);
+      expect(row.anchor_status).toBe('FAILED');
+
+      const batches: unknown = await dataSource.query(
+        'SELECT status, attempts FROM anchor_batches',
+      );
+      expect(batches).toEqual([{ status: 'FAILED', attempts: 3 }]);
+
+      chain.available = true;
+      const afterExhaustion = await request(app.getHttpServer())
+        .post('/api/v1/anchors/batches')
+        .expect(200);
+      expect(afterExhaustion.body).toMatchObject({
+        anchored: 0,
+        reason: 'NOTHING_TO_ANCHOR',
+      });
+    });
+
+    it('reprend un lot deja mine sans publier une seconde transaction', async () => {
+      const reference = await createTransfer();
+      const first = await anchorService.processPendingBatch();
+      expect(first.anchored).toBe(1);
+      expect(chain.batches.size).toBe(1);
+
+      // Simule un arret apres minage mais avant la transaction SQL finale.
+      await dataSource.query(`UPDATE anchor_batches SET status = 'ANCHORING' WHERE id = $1`, [
+        first.batch?.id,
+      ]);
+      await dataSource.query(
+        `UPDATE transactions SET anchor_status = 'PENDING' WHERE reference = $1`,
+        [reference],
+      );
+
+      const recovered = await anchorService.processPendingBatch();
+
+      expect(recovered).toMatchObject({ anchored: 1 });
+      expect(recovered.batch?.id).toBe(first.batch?.id);
+      expect(chain.batches.size).toBe(1);
+      expect((await rowOf(reference)).anchor_status).toBe('ANCHORED');
     });
   });
 
@@ -475,6 +536,22 @@ describe('Integrite et ancrage blockchain (e2e)', () => {
       // Les controles hors chaine restent concluants : ce n est pas une alteration.
       expect(body.checks.fingerprintMatches).toBe(true);
       expect(body.checks.merkleProofValid).toBe(true);
+    });
+
+    it('classe un sel de scellement malforme comme une alteration', async () => {
+      const reference = await createTransfer();
+      await dataSource.query('UPDATE transactions SET fingerprint_salt = $1 WHERE reference = $2', [
+        'sel-invalide',
+        reference,
+      ]);
+
+      const body = await verify(reference);
+
+      expect(body.verdict).toBe(IntegrityVerdict.TAMPERED);
+      expect(body.checks.fingerprintMatches).toBe(false);
+      expect(body.findings).toEqual(
+        expect.arrayContaining([expect.stringContaining('donnees de scellement sont invalides')]),
+      );
     });
 
     it('retourne 404 pour une reference inconnue', async () => {
