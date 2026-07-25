@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Contrat formel de la demande de virement.
+
+  Ce schema est la source de verite des regles structurelles appliquees par
+  l'API : les decorateurs class-validator de `CreateTransferDto` en sont la
+  transposition executable cote NestJS. Il documente le contrat pour les
+  integrateurs qui consomment l'API en XML ou generent des stubs.
+
+  Note : la validite structurelle d'un IBAN (xs:pattern) ne suffit pas. La cle
+  de controle MOD 97-10 (ISO 7064) n'est pas exprimable en XSD 1.0 et reste
+  verifiee par `IsIbanConstraint`.
+-->
+<xs:schema
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:banking:transfer:1.0"
+    targetNamespace="urn:banking:transfer:1.0"
+    elementFormDefault="qualified"
+    version="1.0">
+
+  <!-- ===================================================================== -->
+  <!-- Types simples                                                          -->
+  <!-- ===================================================================== -->
+
+  <xs:simpleType name="IbanType">
+    <xs:annotation>
+      <xs:documentation>
+        IBAN normalise ISO 13616 : 2 lettres pays, 2 chiffres de controle,
+        11 a 30 caracteres alphanumeriques majuscules. Sans espaces.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}"/>
+      <xs:minLength value="15"/>
+      <xs:maxLength value="34"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="CurrencyType">
+    <xs:annotation>
+      <xs:documentation>Code devise ISO 4217 alphabetique.</xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Z]{3}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="AmountType">
+    <xs:annotation>
+      <xs:documentation>
+        Montant strictement positif, 2 decimales maximum, 18 chiffres au total.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:decimal">
+      <xs:minExclusive value="0"/>
+      <xs:fractionDigits value="2"/>
+      <xs:totalDigits value="18"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="LabelType">
+    <xs:annotation>
+      <xs:documentation>
+        Jeu de caracteres « SEPA basic latin ». Exclut les caracteres de
+        controle et les scripts susceptibles d'etre reinjectes dans un flux XML.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Za-z0-9/\-?:().,'+ ]{1,140}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="IdempotencyKeyType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Za-z0-9._:\-]{8,128}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ===================================================================== -->
+  <!-- Type complexe                                                          -->
+  <!-- ===================================================================== -->
+
+  <xs:complexType name="TransferRequestType">
+    <xs:sequence>
+      <xs:element name="debtorIban" type="tns:IbanType">
+        <xs:annotation>
+          <xs:documentation>IBAN du donneur d'ordre.</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="debtorName" type="tns:LabelType" minOccurs="0"/>
+      <xs:element name="creditorIban" type="tns:IbanType">
+        <xs:annotation>
+          <xs:documentation>
+            IBAN du beneficiaire. Doit differer de debtorIban : contrainte
+            inter-champs, verifiee par la couche metier.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="creditorName" type="tns:LabelType"/>
+      <xs:element name="amount" type="tns:AmountType"/>
+      <xs:element name="currency" type="tns:CurrencyType">
+        <xs:annotation>
+          <xs:documentation>
+            Doit appartenir a la liste ALLOWED_CURRENCIES de l'instance.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="endToEndLabel" type="tns:LabelType" minOccurs="0"/>
+    </xs:sequence>
+    <xs:attribute name="idempotencyKey" type="tns:IdempotencyKeyType" use="optional"/>
+  </xs:complexType>
+
+  <xs:element name="TransferRequest" type="tns:TransferRequestType"/>
+
+</xs:schema>

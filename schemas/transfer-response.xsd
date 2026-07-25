@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Contrat formel de la reponse de l'API (transaction et erreur).
+
+  Correspond a `TransferResponseDto` et `ErrorResponseDto`. Point structurant :
+  les IBAN ne sont **jamais** restitues en clair — le type `MaskedIbanType`
+  impose la forme masquee `FR76****0189`.
+-->
+<xs:schema
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:banking:transfer:1.0"
+    targetNamespace="urn:banking:transfer:1.0"
+    elementFormDefault="qualified"
+    version="1.0">
+
+  <!-- ===================================================================== -->
+  <!-- Types simples                                                          -->
+  <!-- ===================================================================== -->
+
+  <xs:simpleType name="TransactionReferenceType">
+    <xs:annotation>
+      <xs:documentation>
+        Reference fonctionnelle : TRF- + date UTC (AAAAMMJJ) + 8 caracteres
+        Crockford base32 (alphabet sans I, L, O, U).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="TRF-[0-9]{8}-[0-9A-HJ-NP-Z]{8}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="MaskedIbanType">
+    <xs:annotation>
+      <xs:documentation>
+        IBAN masque : code pays + cle de controle, 4 asterisques, 4 derniers
+        caracteres. Exemple : FR76****0189.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Z]{2}[0-9]{2}\*{4}[A-Z0-9]{4}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="TransactionStatusType">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="PENDING">
+        <xs:annotation>
+          <xs:documentation>Demande validee et enregistree, avant appel externe.</xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="PROCESSING">
+        <xs:annotation>
+          <xs:documentation>Appel au service SOAP en cours.</xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="COMPLETED">
+        <xs:annotation>
+          <xs:documentation>Enrichissement termine, transaction complete.</xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+      <xs:enumeration value="FAILED">
+        <xs:annotation>
+          <xs:documentation>Echec de l'echange externe. Etat terminal.</xs:documentation>
+        </xs:annotation>
+      </xs:enumeration>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="CurrencyType">
+    <xs:restriction base="xs:string">
+      <xs:pattern value="[A-Z]{3}"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <xs:simpleType name="AmountType">
+    <xs:restriction base="xs:decimal">
+      <xs:minExclusive value="0"/>
+      <xs:fractionDigits value="2"/>
+      <xs:totalDigits value="18"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- ===================================================================== -->
+  <!-- Types complexes                                                        -->
+  <!-- ===================================================================== -->
+
+  <xs:complexType name="SoapExchangeSummaryType">
+    <xs:annotation>
+      <xs:documentation>
+        Metadonnees de l'echange SOAP. Presentes meme en cas d'echec, pour le
+        diagnostic cote integrateur.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="operation" type="xs:string" minOccurs="0"/>
+      <xs:element name="durationMs" type="xs:nonNegativeInteger" minOccurs="0"/>
+      <xs:element name="attempts" type="xs:positiveInteger" minOccurs="0"/>
+      <xs:element name="faultCode" type="xs:string" minOccurs="0"/>
+      <xs:element name="faultString" type="xs:string" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="TransferResponseType">
+    <xs:sequence>
+      <xs:element name="reference" type="tns:TransactionReferenceType"/>
+      <xs:element name="status" type="tns:TransactionStatusType"/>
+      <xs:element name="debtorIbanMasked" type="tns:MaskedIbanType"/>
+      <xs:element name="debtorName" type="xs:string" minOccurs="0"/>
+      <xs:element name="creditorIbanMasked" type="tns:MaskedIbanType"/>
+      <xs:element name="creditorName" type="xs:string"/>
+      <xs:element name="amount" type="tns:AmountType"/>
+      <xs:element name="currency" type="tns:CurrencyType"/>
+      <xs:element name="endToEndLabel" type="xs:string" minOccurs="0"/>
+      <xs:element name="amountInWords" type="xs:string" minOccurs="0">
+        <xs:annotation>
+          <xs:documentation>
+            Montant en toutes lettres restitue par l'operation SOAP
+            NumberToDollars. Absent tant que le statut n'est pas COMPLETED.
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="failureReason" type="xs:string" minOccurs="0"/>
+      <xs:element name="soap" type="tns:SoapExchangeSummaryType"/>
+      <xs:element name="correlationId" type="xs:string"/>
+      <xs:element name="processedAt" type="xs:dateTime" minOccurs="0"/>
+      <xs:element name="createdAt" type="xs:dateTime"/>
+      <xs:element name="updatedAt" type="xs:dateTime"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:complexType name="ErrorResponseType">
+    <xs:annotation>
+      <xs:documentation>
+        Enveloppe d'erreur unique de l'API. `reference` est renseigne lorsque la
+        transaction a pu etre enregistree malgre l'echec (502 / 504) : elle
+        reste consultable via GET /transfers/{reference}.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="statusCode" type="xs:positiveInteger"/>
+      <xs:element name="error" type="xs:string">
+        <xs:annotation>
+          <xs:documentation>
+            Code stable : VALIDATION_ERROR, CURRENCY_NOT_ALLOWED,
+            AMOUNT_LIMIT_EXCEEDED, SAME_ACCOUNT_TRANSFER, TRANSACTION_NOT_FOUND,
+            SOAP_FAULT, SOAP_TIMEOUT, SOAP_UNAVAILABLE, SOAP_INVALID_RESPONSE...
+          </xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="message" type="xs:string" maxOccurs="unbounded"/>
+      <xs:element name="correlationId" type="xs:string"/>
+      <xs:element name="timestamp" type="xs:dateTime"/>
+      <xs:element name="path" type="xs:string"/>
+      <xs:element name="reference" type="tns:TransactionReferenceType" minOccurs="0"/>
+    </xs:sequence>
+  </xs:complexType>
+
+  <xs:element name="TransferResponse" type="tns:TransferResponseType"/>
+  <xs:element name="ErrorResponse" type="tns:ErrorResponseType"/>
+
+</xs:schema>
