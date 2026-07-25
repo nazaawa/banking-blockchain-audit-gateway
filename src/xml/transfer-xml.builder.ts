@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { CreateTransferDto } from '../transactions/dto/create-transfer.dto';
 import type { Transaction } from '../transactions/entities/transaction.entity';
+import { PaymentChannel } from '../mobile-money/enums/mobile-money.enum';
 
 /** Espace de noms des documents metier de la passerelle. */
 export const TRANSFER_NAMESPACE = 'urn:banking:transfer:1.0';
@@ -13,6 +14,7 @@ export const TRANSFER_NAMESPACE = 'urn:banking:transfer:1.0';
  * serialiseur historique pour rejouer la verification d'archives anciennes.
  */
 export const RECORD_FORMAT_VERSION = '1.0';
+export const MOBILE_MONEY_RECORD_FORMAT_VERSION = '2.0';
 
 /** Indentation fixe : elle fait partie du document canonique. */
 const INDENT = '  ';
@@ -73,9 +75,36 @@ export class TransferXmlBuilder {
       );
     }
 
+    const formatVersion = this.getRecordFormatVersion(transaction);
+    const mobileMoneyLines =
+      transaction.paymentChannel === PaymentChannel.MOBILE_MONEY
+        ? [
+            `${INDENT}<mobileMoney>`,
+            this.element('operator', transaction.mobileMoneyOperator as string, 2),
+            this.element('payerMsisdn', transaction.payerMsisdn as string, 2),
+            this.element('aggregatorReference', transaction.aggregatorReference as string, 2),
+            this.element('status', transaction.mobileMoneyStatus as string, 2),
+            this.element(
+              'confirmedAmount',
+              this.formatAmount(Number(transaction.aggregatorAmount)),
+              2,
+            ),
+            this.element('confirmedCurrency', transaction.aggregatorCurrency as string, 2),
+            this.element(
+              'confirmedAt',
+              this.formatDate(transaction.mobileMoneyConfirmedAt as Date),
+              2,
+            ),
+            this.element('bankStatus', transaction.bankStatus as string, 2),
+            this.element('reconciliationStatus', transaction.reconciliationStatus as string, 2),
+            this.element('reconciledAt', this.formatDate(transaction.reconciledAt as Date), 2),
+            `${INDENT}</mobileMoney>`,
+          ]
+        : [];
+
     const lines = [
       '<?xml version="1.0" encoding="UTF-8"?>',
-      `<TransferRecord xmlns="${TRANSFER_NAMESPACE}" version="${RECORD_FORMAT_VERSION}">`,
+      `<TransferRecord xmlns="${TRANSFER_NAMESPACE}" version="${formatVersion}">`,
       this.element('reference', transaction.reference, 1),
       this.element('status', transaction.status, 1),
       `${INDENT}<debtor>`,
@@ -89,6 +118,7 @@ export class TransferXmlBuilder {
       this.element('amount', this.formatAmount(Number(transaction.amount)), 1),
       this.element('currency', transaction.currency, 1),
       this.optionalElement('endToEndLabel', transaction.endToEndLabel, 1),
+      ...mobileMoneyLines,
       `${INDENT}<soap>`,
       this.optionalElement('operation', transaction.soapOperation, 2),
       this.optionalElement('durationMs', this.formatInteger(transaction.soapDurationMs), 2),
@@ -104,6 +134,12 @@ export class TransferXmlBuilder {
     ];
 
     return lines.filter((line): line is string => line !== null).join('\n');
+  }
+
+  getRecordFormatVersion(transaction: Transaction): string {
+    return transaction.paymentChannel === PaymentChannel.MOBILE_MONEY
+      ? MOBILE_MONEY_RECORD_FORMAT_VERSION
+      : RECORD_FORMAT_VERSION;
   }
 
   // -------------------------------------------------------------------------

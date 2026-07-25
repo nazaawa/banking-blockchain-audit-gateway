@@ -95,6 +95,35 @@
     </xs:sequence>
   </xs:complexType>
 
+  <xs:complexType name="MobileMoneyType">
+    <xs:sequence>
+      <xs:element name="operator">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:enumeration value="MPESA"/>
+            <xs:enumeration value="AIRTEL_MONEY"/>
+            <xs:enumeration value="ORANGE_MONEY"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="payerMsisdn">
+        <xs:simpleType>
+          <xs:restriction base="xs:string">
+            <xs:pattern value="\+[1-9][0-9]{7,14}"/>
+          </xs:restriction>
+        </xs:simpleType>
+      </xs:element>
+      <xs:element name="aggregatorReference" type="xs:string"/>
+      <xs:element name="status" fixed="CONFIRMED"/>
+      <xs:element name="confirmedAmount" type="tns:AmountType"/>
+      <xs:element name="confirmedCurrency" type="tns:CurrencyType"/>
+      <xs:element name="confirmedAt" type="xs:dateTime"/>
+      <xs:element name="bankStatus" fixed="COMPLETED"/>
+      <xs:element name="reconciliationStatus" fixed="MATCHED"/>
+      <xs:element name="reconciledAt" type="xs:dateTime"/>
+    </xs:sequence>
+  </xs:complexType>
+
   <xs:complexType name="TransferRecordType">
     <xs:sequence>
       <xs:element name="reference" type="tns:TransactionReferenceType"/>
@@ -104,6 +133,7 @@
       <xs:element name="amount" type="tns:AmountType"/>
       <xs:element name="currency" type="tns:CurrencyType"/>
       <xs:element name="endToEndLabel" type="xs:string" minOccurs="0"/>
+      <xs:element name="mobileMoney" type="tns:MobileMoneyType" minOccurs="0"/>
       <xs:element name="soap" type="tns:SoapExchangeType"/>
       <xs:element name="correlationId" type="xs:string"/>
       <xs:element name="createdAt" type="xs:dateTime"/>

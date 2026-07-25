@@ -5,9 +5,10 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, QueryRunner, Repository } from 'typeorm';
 import { anchorConfig, blockchainConfig } from '../config/configuration';
 import { SCHEMAS, XsdValidatorService } from '../xml/xsd-validator.service';
-import { RECORD_FORMAT_VERSION, TransferXmlBuilder } from '../xml/transfer-xml.builder';
+import { TransferXmlBuilder } from '../xml/transfer-xml.builder';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
+import { PaymentChannel, ReconciliationStatus } from '../mobile-money/enums/mobile-money.enum';
 import { AnchorBatch } from './entities/anchor-batch.entity';
 import { AnchorStatus, BatchStatus } from './enums/anchor-status.enum';
 import { EvmAnchorClient } from './evm-anchor.client';
@@ -114,6 +115,12 @@ export class AnchorService implements OnModuleInit {
     ) {
       return transaction;
     }
+    if (
+      transaction.paymentChannel === PaymentChannel.MOBILE_MONEY &&
+      transaction.reconciliationStatus !== ReconciliationStatus.MATCHED
+    ) {
+      return transaction;
+    }
     if (transaction.fingerprint !== null) return transaction;
 
     try {
@@ -123,7 +130,7 @@ export class AnchorService implements OnModuleInit {
       const salt = generateSalt();
       transaction.fingerprintSalt = salt;
       transaction.fingerprint = computeFingerprint(salt, recordXml);
-      transaction.recordFormatVersion = RECORD_FORMAT_VERSION;
+      transaction.recordFormatVersion = this.xmlBuilder.getRecordFormatVersion(transaction);
       transaction.sealedAt = new Date();
       transaction.anchorStatus = AnchorStatus.PENDING;
 
@@ -200,6 +207,13 @@ export class AnchorService implements OnModuleInit {
         .setOnLocked('skip_locked')
         .where('transaction.anchorStatus = :status', { status: AnchorStatus.PENDING })
         .andWhere('transaction.fingerprint IS NOT NULL')
+        .andWhere(
+          '(transaction.paymentChannel != :mobileMoney OR transaction.reconciliationStatus = :matched)',
+          {
+            mobileMoney: PaymentChannel.MOBILE_MONEY,
+            matched: ReconciliationStatus.MATCHED,
+          },
+        )
         .andWhere('transaction.batchId IS NULL')
         .orderBy('transaction.sealedAt', 'ASC')
         .take(this.config.batchMaxSize)

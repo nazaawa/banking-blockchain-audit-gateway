@@ -43,6 +43,8 @@ const PARTIAL_KEYS = new Set([
   'cardnumber',
   'card_number',
   'phone',
+  'msisdn',
+  'payermsisdn',
   'email',
 ]);
 
