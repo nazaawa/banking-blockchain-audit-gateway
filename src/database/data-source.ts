@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { AnchorBatch } from '../blockchain/entities/anchor-batch.entity';
 import { TransactionEvent } from '../events/entities/transaction-event.entity';
+import { Refund } from '../refunds/entities/refund.entity';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { MobileMoneyWebhookEvent } from '../mobile-money/entities/mobile-money-webhook-event.entity';
 
@@ -22,7 +23,7 @@ export default new DataSource({
   username: process.env.DB_USERNAME ?? 'banking',
   password: process.env.DB_PASSWORD ?? 'banking',
   database: process.env.DB_NAME ?? 'banking_soap',
-  entities: [Transaction, AuditLog, AnchorBatch, MobileMoneyWebhookEvent, TransactionEvent],
+  entities: [Transaction, AuditLog, AnchorBatch, MobileMoneyWebhookEvent, TransactionEvent, Refund],
   migrations: ['src/database/migrations/*.ts'],
   synchronize: false,
   logging: false,

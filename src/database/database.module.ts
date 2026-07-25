@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { AnchorBatch } from '../blockchain/entities/anchor-batch.entity';
 import { TransactionEvent } from '../events/entities/transaction-event.entity';
+import { Refund } from '../refunds/entities/refund.entity';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { MobileMoneyWebhookEvent } from '../mobile-money/entities/mobile-money-webhook-event.entity';
 
@@ -14,6 +15,7 @@ export const ENTITIES = [
   AnchorBatch,
   MobileMoneyWebhookEvent,
   TransactionEvent,
+  Refund,
 ];
 
 @Module({

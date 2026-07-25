@@ -13,6 +13,7 @@ import { SoapModule } from './soap/soap.module';
 import { XmlModule } from './xml/xml.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { EventsModule } from './events/events.module';
+import { RefundsModule } from './refunds/refunds.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { MobileMoneyModule } from './mobile-money/mobile-money.module';
 
@@ -30,6 +31,7 @@ import { MobileMoneyModule } from './mobile-money/mobile-money.module';
     XmlModule,
     BlockchainModule,
     EventsModule,
+    RefundsModule,
     AuditModule,
     TransactionsModule,
     MobileMoneyModule,
