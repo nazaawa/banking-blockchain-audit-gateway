@@ -14,6 +14,10 @@ process.env.DB_SYNCHRONIZE = 'true';
 process.env.DB_LOGGING = 'false';
 process.env.SWAGGER_ENABLED = 'false';
 process.env.LOG_LEVEL = 'error';
+// Obligatoire pour la validation de configuration. Les suites remplacent le
+// client SOAP avant de demarrer l'application : cette URL n'est jamais appelee.
+process.env.SOAP_ENDPOINT = 'https://example.test/soap';
+process.env.SOAP_WSDL_SOURCE = 'local';
 process.env.ALLOWED_CURRENCIES = 'EUR,USD,GBP';
 process.env.TRANSFER_MAX_AMOUNT = '1000000';
 process.env.AUDIT_PERSIST_PAYLOADS = 'true';
