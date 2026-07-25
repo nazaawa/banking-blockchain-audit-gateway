@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
+import { EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { Transaction } from './entities/transaction.entity';
 import type { QueryTransfersDto } from './dto/query-transfers.dto';
 
@@ -24,8 +24,12 @@ export class TransactionsRepository {
     return this.repository.create(data);
   }
 
-  async save(transaction: Transaction): Promise<Transaction> {
-    return this.repository.save(transaction);
+  /**
+   * @param manager transaction SQL englobante, lorsque l'ecriture metier doit
+   *        etre indissociable de la consignation du fait correspondant.
+   */
+  async save(transaction: Transaction, manager?: EntityManager): Promise<Transaction> {
+    return (manager?.getRepository(Transaction) ?? this.repository).save(transaction);
   }
 
   async findByReference(reference: string): Promise<Transaction | null> {

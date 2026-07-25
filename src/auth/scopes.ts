@@ -12,6 +12,8 @@ export const SCOPES = {
   /** Declenche un mouvement sortant : habilitation la plus sensible. */
   refundsWrite: 'refunds:write',
   reconciliationWrite: 'reconciliation:write',
+  ledgerRead: 'ledger:read',
+  treasuryWrite: 'treasury:write',
   anchorsRead: 'anchors:read',
   anchorsWrite: 'anchors:write',
   simulatorWrite: 'simulator:write',

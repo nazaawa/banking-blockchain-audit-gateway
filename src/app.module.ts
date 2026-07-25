@@ -16,6 +16,9 @@ import { XmlModule } from './xml/xml.module';
 import { BlockchainModule } from './blockchain/blockchain.module';
 import { EventsModule } from './events/events.module';
 import { RefundsModule } from './refunds/refunds.module';
+import { AccountingModule } from './accounting/accounting.module';
+import { TreasuryModule } from './treasury/treasury.module';
+import { TransactionStateModule } from './transactions/state/transaction-state.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { MobileMoneyModule } from './mobile-money/mobile-money.module';
 
@@ -30,10 +33,13 @@ import { MobileMoneyModule } from './mobile-money/mobile-money.module';
     }),
     AuthModule,
     DatabaseModule,
+    TransactionStateModule,
     SoapModule,
     XmlModule,
     BlockchainModule,
     EventsModule,
+    AccountingModule,
+    TreasuryModule,
     RefundsModule,
     AuditModule,
     TransactionsModule,

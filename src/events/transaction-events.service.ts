@@ -6,6 +6,7 @@ import { AnchorStatus } from '../blockchain/enums/anchor-status.enum';
 import { computeFingerprint, generateSalt } from '../blockchain/fingerprint.util';
 import { getCorrelationId } from '../common/context/request-context';
 import { SCHEMAS, XsdValidatorService } from '../xml/xsd-validator.service';
+import { LedgerPostingService } from '../accounting/ledger-posting.service';
 import type { Transaction } from '../transactions/entities/transaction.entity';
 import { TransactionEvent } from './entities/transaction-event.entity';
 import { TransactionEventType } from './enums/transaction-event.enum';
@@ -19,6 +20,16 @@ const PG_UNIQUE_VIOLATION = '23505';
 
 /** Tentatives d'insertion en cas de collision de rang sur une meme transaction. */
 const MAX_SEQUENCE_ATTEMPTS = 5;
+
+/**
+ * Point de sauvegarde encadrant une tentative d'insertion.
+ *
+ * PostgreSQL avorte **toute** la transaction sur une violation de contrainte :
+ * sans cela, la premiere collision de rang rendrait inutilisable la transaction
+ * metier englobante, et la tentative suivante echouerait sur `25P02` au lieu de
+ * rejouer. Le nom est fixe car les tentatives sont strictement sequentielles.
+ */
+const SEQUENCE_SAVEPOINT = 'transaction_event_attempt';
 
 /**
  * Evenements portant les parties du virement.
@@ -74,6 +85,7 @@ export class TransactionEventsService {
     private readonly events: Repository<TransactionEvent>,
     private readonly xmlBuilder: TransactionEventXmlBuilder,
     private readonly xsdValidator: XsdValidatorService,
+    private readonly posting: LedgerPostingService,
   ) {}
 
   /**
@@ -143,8 +155,21 @@ export class TransactionEventsService {
         anchorStatus: AnchorStatus.PENDING,
       });
 
+      // Dans une transaction metier englobante, l'insertion est encadree par un
+      // point de sauvegarde : une collision de rang doit pouvoir etre rejouee
+      // sans emporter l'ecriture metier deja effectuee.
+      const nested = manager?.queryRunner?.isTransactionActive === true;
+      if (nested) await manager.query(`SAVEPOINT ${SEQUENCE_SAVEPOINT}`);
+
       try {
         const saved = await repository.save(event);
+
+        // La consequence comptable appartient a la meme transaction que le fait.
+        // Un fait monetaire sans son ecriture rendrait le journal faux sans que
+        // rien ne le signale — et le journal est append-only, donc irreparable.
+        await this.posting.post(saved, transaction, manager);
+
+        if (nested) await manager.query(`RELEASE SAVEPOINT ${SEQUENCE_SAVEPOINT}`);
 
         this.logger.log({
           event: 'transaction-event.recorded',
@@ -156,6 +181,11 @@ export class TransactionEventsService {
 
         return saved;
       } catch (error) {
+        // Rend la transaction englobante de nouveau utilisable : sans ce retour
+        // arriere, toute requete ulterieure echouerait, y compris la relecture
+        // du sommet de chaine faite par la tentative suivante.
+        if (nested) await manager.query(`ROLLBACK TO SAVEPOINT ${SEQUENCE_SAVEPOINT}`);
+
         // Un autre processus a pris le rang : la chaine a un nouveau sommet, il
         // faut rechainer sur lui plutot que forcer une branche parallele.
         if (this.isSequenceCollision(error) && attempt < MAX_SEQUENCE_ATTEMPTS) {
@@ -194,8 +224,15 @@ export class TransactionEventsService {
    *
    * Idempotent : un dossier deja clos n'est jamais reclos.
    */
-  async closeCase(transaction: Transaction, detail?: string): Promise<TransactionEvent | null> {
-    const chain = await this.findChain(transaction.reference);
+  async closeCase(
+    transaction: Transaction,
+    detail?: string,
+    manager?: EntityManager,
+  ): Promise<TransactionEvent | null> {
+    // Lire via le meme manager est indispensable : depuis l'exterieur de la
+    // transaction englobante, les faits qu'elle vient d'ajouter sont invisibles,
+    // et la cloture scellerait un total de faits deja faux.
+    const chain = await this.findChain(transaction.reference, manager);
 
     if (chain.length === 0) return null;
     if (chain.some((event) => event.eventType === TransactionEventType.CASE_CLOSED)) {
@@ -203,17 +240,20 @@ export class TransactionEventsService {
     }
 
     try {
-      return await this.record({
-        type: TransactionEventType.CASE_CLOSED,
-        transaction,
-        detail: detail ?? 'Dossier clos',
-      });
+      return await this.record(
+        {
+          type: TransactionEventType.CASE_CLOSED,
+          transaction,
+          detail: detail ?? 'Dossier clos',
+        },
+        manager,
+      );
     } catch (error) {
       // L'index partiel garantit une seule cloture par dossier. Deux appels
       // concurrents peuvent tous deux constater l'absence avant que l'un gagne
       // l'insertion ; le perdant renvoie alors la cloture existante.
       if (this.isUniqueViolation(error)) {
-        const existing = await this.events.findOne({
+        const existing = await (manager?.getRepository(TransactionEvent) ?? this.events).findOne({
           where: {
             transactionReference: transaction.reference,
             eventType: TransactionEventType.CASE_CLOSED,
@@ -226,8 +266,11 @@ export class TransactionEventsService {
   }
 
   /** Chaine complete d'une transaction, du plus ancien au plus recent. */
-  async findChain(transactionReference: string): Promise<TransactionEvent[]> {
-    return this.events.find({
+  async findChain(
+    transactionReference: string,
+    manager?: EntityManager,
+  ): Promise<TransactionEvent[]> {
+    return (manager?.getRepository(TransactionEvent) ?? this.events).find({
       where: { transactionReference },
       order: { sequence: 'ASC' },
     });

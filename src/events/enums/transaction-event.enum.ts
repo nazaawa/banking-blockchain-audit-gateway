@@ -41,6 +41,9 @@ export enum TransactionEventType {
   REFUND_REOPENED = 'REFUND_REOPENED',
   REFUND_COMPLETED = 'REFUND_COMPLETED',
   REFUND_FAILED = 'REFUND_FAILED',
+
+  /** Rapatriement des fonds de l'agregateur vers le compte de reglement. */
+  SETTLEMENT_SWEPT = 'SETTLEMENT_SWEPT',
 }
 
 /**

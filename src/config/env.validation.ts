@@ -12,6 +12,8 @@ type Rule = {
   kind?: 'string' | 'int' | 'float' | 'boolean' | 'url' | 'enum' | 'pattern';
   values?: string[];
   min?: number;
+  max?: number;
+  exclusiveMax?: boolean;
   pattern?: RegExp;
   /** Description du format attendu, pour les regles `pattern`. */
   expected?: string;
@@ -42,6 +44,7 @@ const RULES: Rule[] = [
   { key: 'SOAP_RETRY_DELAY_MS', kind: 'int', min: 0 },
   { key: 'SOAP_MAX_RESPONSE_BYTES', kind: 'int', min: 1024 },
   { key: 'TRANSFER_MAX_AMOUNT', kind: 'float', min: 0 },
+  { key: 'MOBILE_MONEY_FEE_RATE', kind: 'float', min: 0, max: 1, exclusiveMax: true },
   {
     key: 'MOBILE_MONEY_SETTLEMENT_IBAN',
     kind: 'pattern',
@@ -100,6 +103,14 @@ function checkRule(rule: Rule, raw: string | undefined): string | null {
       if (rule.min !== undefined && Number.parseInt(raw, 10) < rule.min) {
         return `${rule.key} doit etre >= ${rule.min} (recu: "${raw}")`;
       }
+      if (
+        rule.max !== undefined &&
+        (rule.exclusiveMax
+          ? Number.parseInt(raw, 10) >= rule.max
+          : Number.parseInt(raw, 10) > rule.max)
+      ) {
+        return `${rule.key} doit etre ${rule.exclusiveMax ? '<' : '<='} ${rule.max} (recu: "${raw}")`;
+      }
       return null;
     }
     case 'float': {
@@ -107,6 +118,9 @@ function checkRule(rule: Rule, raw: string | undefined): string | null {
       if (!Number.isFinite(parsed)) return `${rule.key} doit etre un nombre (recu: "${raw}")`;
       if (rule.min !== undefined && parsed < rule.min) {
         return `${rule.key} doit etre >= ${rule.min} (recu: "${raw}")`;
+      }
+      if (rule.max !== undefined && (rule.exclusiveMax ? parsed >= rule.max : parsed > rule.max)) {
+        return `${rule.key} doit etre ${rule.exclusiveMax ? '<' : '<='} ${rule.max} (recu: "${raw}")`;
       }
       return null;
     }

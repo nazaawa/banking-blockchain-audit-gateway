@@ -8,13 +8,14 @@ import {
 } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
-import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { DataSource, EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { getCorrelationId } from '../common/context/request-context';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { amountsMatch, currenciesMatch } from '../mobile-money/amount.util';
 import { CaseStatus, RefundStatus } from '../mobile-money/enums/mobile-money.enum';
 import { Transaction } from '../transactions/entities/transaction.entity';
+import { stateOf, TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import { Refund } from './entities/refund.entity';
 import {
   PROVIDER_REFUND_PORT,
@@ -64,6 +65,7 @@ export class RefundsService {
     @InjectRepository(Transaction)
     private readonly transactions: Repository<Transaction>,
     private readonly events: TransactionEventsService,
+    private readonly stateMachine: TransactionStateMachine,
     @Inject(PROVIDER_REFUND_PORT)
     private readonly provider: ProviderRefundPort,
     @InjectDataSource()
@@ -287,18 +289,28 @@ export class RefundsService {
     refund.status = RefundStatus.REQUESTED;
     refund.attempts += 1;
     refund.requestedAt ??= new Date();
-    const inFlight = await this.refunds.save(refund);
 
-    if (firstAttempt) {
-      await this.syncTransaction(transaction, RefundStatus.REQUESTED);
-      await this.events.record({
-        type: TransactionEventType.REFUND_REQUESTED,
-        transaction,
-        observedAmount: inFlight.amount,
-        observedCurrency: inFlight.currency,
-        detail: `Remboursement de ${inFlight.amount.toFixed(2)} ${inFlight.currency} demande`,
-      });
-    }
+    // La transaction SQL se referme avant la sollicitation du fournisseur : un
+    // appel reseau ne doit jamais maintenir des lignes verrouillees.
+    const inFlight = await this.dataSource.transaction(async (manager) => {
+      const persisted = await manager.getRepository(Refund).save(refund);
+
+      if (firstAttempt) {
+        await this.syncTransaction(transaction, RefundStatus.REQUESTED, undefined, manager);
+        await this.events.record(
+          {
+            type: TransactionEventType.REFUND_REQUESTED,
+            transaction,
+            observedAmount: persisted.amount,
+            observedCurrency: persisted.currency,
+            detail: `Remboursement de ${persisted.amount.toFixed(2)} ${persisted.currency} demande`,
+          },
+          manager,
+        );
+      }
+
+      return persisted;
+    });
 
     try {
       const result = await this.provider.refund({
@@ -330,27 +342,38 @@ export class RefundsService {
     refund.completedAt = new Date();
     refund.lastError = null;
     refund.retryable = false;
-    const completed = await this.refunds.save(refund);
+    // Extinction de la dette, resolution du dossier et cloture forment un tout.
+    // C'est cette cloture qui rend le dossier ancrable : la publier alors qu'un
+    // des trois manquerait reviendrait a sceller un etat qui n'a pas existe.
+    const completed = await this.dataSource.transaction(async (manager) => {
+      const persisted = await manager.getRepository(Refund).save(refund);
 
-    // La dette est eteinte : le dossier d'exception n'a plus lieu d'etre ouvert.
-    const updated = await this.syncTransaction(
-      transaction,
-      RefundStatus.COMPLETED,
-      CaseStatus.RESOLVED,
-    );
+      // La dette est eteinte : le dossier d'exception n'a plus lieu d'etre ouvert.
+      const updated = await this.syncTransaction(
+        transaction,
+        RefundStatus.COMPLETED,
+        CaseStatus.RESOLVED,
+        manager,
+      );
 
-    await this.events.record({
-      type: TransactionEventType.REFUND_COMPLETED,
-      transaction: updated,
-      observedAmount: completed.amount,
-      observedCurrency: completed.currency,
-      detail:
-        `Remboursement confirme (${providerRefundReference})` +
-        (deduplicated ? ' — reprise d une demande anterieure' : ''),
+      await this.events.record(
+        {
+          type: TransactionEventType.REFUND_COMPLETED,
+          transaction: updated,
+          observedAmount: persisted.amount,
+          observedCurrency: persisted.currency,
+          detail:
+            `Remboursement confirme (${providerRefundReference})` +
+            (deduplicated ? ' — reprise d une demande anterieure' : ''),
+        },
+        manager,
+      );
+
+      // La dette est eteinte et le dossier resolu : plus aucun fait n'est attendu.
+      await this.events.closeCase(updated, 'Dossier clos apres remboursement du payeur', manager);
+
+      return persisted;
     });
-
-    // La dette est eteinte et le dossier resolu : plus aucun fait n'est attendu.
-    await this.events.closeCase(updated, 'Dossier clos apres remboursement du payeur');
 
     this.logger.log({
       event: 'refund.completed',
@@ -382,17 +405,29 @@ export class RefundsService {
     refund.status = RefundStatus.FAILED;
     refund.lastError = reason.slice(0, 1024);
     refund.retryable = !rejected;
-    const failed = await this.refunds.save(refund);
+    const failed = await this.dataSource.transaction(async (manager) => {
+      const persisted = await manager.getRepository(Refund).save(refund);
 
-    // Le dossier reste ouvert : la dette envers le payeur n'est pas eteinte.
-    const updated = await this.syncTransaction(transaction, RefundStatus.FAILED);
+      // Le dossier reste ouvert : la dette envers le payeur n'est pas eteinte.
+      const updated = await this.syncTransaction(
+        transaction,
+        RefundStatus.FAILED,
+        undefined,
+        manager,
+      );
 
-    await this.events.record({
-      type: TransactionEventType.REFUND_FAILED,
-      transaction: updated,
-      observedAmount: failed.amount,
-      observedCurrency: failed.currency,
-      detail: `Tentative ${failed.attempts} en echec : ${reason}`,
+      await this.events.record(
+        {
+          type: TransactionEventType.REFUND_FAILED,
+          transaction: updated,
+          observedAmount: persisted.amount,
+          observedCurrency: persisted.currency,
+          detail: `Tentative ${persisted.attempts} en echec : ${reason}`,
+        },
+        manager,
+      );
+
+      return persisted;
     });
 
     this.logger.error({
@@ -412,13 +447,21 @@ export class RefundsService {
     transaction: Transaction,
     refundStatus: RefundStatus,
     caseStatus?: CaseStatus,
+    manager?: EntityManager,
   ): Promise<Transaction> {
-    await this.transactions.update(
+    const repository = manager?.getRepository(Transaction) ?? this.transactions;
+    const before = stateOf(transaction);
+
+    await repository.update(
       { id: transaction.id },
       { refundStatus, ...(caseStatus ? { caseStatus } : {}) },
     );
 
-    const updated = await this.transactions.findOneByOrFail({ id: transaction.id });
+    const updated = await repository.findOneByOrFail({ id: transaction.id });
+
+    // Point de passage unique du remboursement vers la vue metier : c'est ici
+    // que se joue la regle « un dossier ne se resout pas dette pendante ».
+    this.stateMachine.assertTransition(before, stateOf(updated), updated.reference);
     Object.assign(transaction, {
       refundStatus: updated.refundStatus,
       caseStatus: updated.caseStatus,

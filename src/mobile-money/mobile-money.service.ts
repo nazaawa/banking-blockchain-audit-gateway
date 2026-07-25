@@ -9,15 +9,16 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { getCorrelationId } from '../common/context/request-context';
 import { businessConfig, mobileMoneyConfig } from '../config/configuration';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
 import { ReferenceGenerator } from '../transactions/reference.generator';
 import { TransactionsRepository } from '../transactions/transactions.repository';
+import { stateOf, TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { AggregatorSimulatorService } from './aggregator-simulator.service';
@@ -35,6 +36,9 @@ import {
 
 const MAX_REFERENCE_ATTEMPTS = 5;
 
+/** Les montants sont au centime : la commission ne fait pas exception. */
+const roundToCent = (value: number): number => Math.round(value * 100) / 100;
+
 /** Enregistrement et transitions atomiques du paiement Mobile Money. */
 @Injectable()
 export class MobileMoneyService {
@@ -47,6 +51,9 @@ export class MobileMoneyService {
     private readonly references: ReferenceGenerator,
     private readonly aggregator: AggregatorSimulatorService,
     private readonly events: TransactionEventsService,
+    private readonly stateMachine: TransactionStateMachine,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
     @Inject(businessConfig.KEY)
     private readonly business: ConfigType<typeof businessConfig>,
     @Inject(mobileMoneyConfig.KEY)
@@ -95,12 +102,25 @@ export class MobileMoneyService {
       });
 
       try {
-        const saved = await this.repository.save(transaction);
-        await this.events.record({
-          type: TransactionEventType.PAYMENT_INITIATED,
-          transaction: saved,
-          detail: `Paiement ${saved.mobileMoneyOperator} initie`,
+        // Le fait d'ouverture porte les parties du paiement : c'est la reference
+        // contre laquelle la verification confronte la ligne. L'enregistrer
+        // separement laisserait une fenetre ou la ligne existe sans son temoin.
+        const saved = await this.dataSource.transaction(async (manager) => {
+          const persisted = await this.repository.save(transaction, manager);
+          this.stateMachine.assertInitialState(stateOf(persisted), persisted.reference);
+
+          await this.events.record(
+            {
+              type: TransactionEventType.PAYMENT_INITIATED,
+              transaction: persisted,
+              detail: `Paiement ${persisted.mobileMoneyOperator} initie`,
+            },
+            manager,
+          );
+
+          return persisted;
         });
+
         this.logger.log({
           event: 'mobile-money.initiated',
           reference: saved.reference,
@@ -174,39 +194,63 @@ export class MobileMoneyService {
       return { transaction: await this.markAmountMismatch(transaction, webhook), claimed: false };
     }
 
-    const outcome = await this.transactions
-      .createQueryBuilder()
-      .update(Transaction)
-      .set({
-        providerStatus: ProviderStatus.CONFIRMED,
-        aggregatorAmount: webhook.amount,
-        aggregatorCurrency: webhook.currency,
-        mobileMoneyConfirmedAt: new Date(webhook.occurredAt),
-        bankStatus: BankProcessingStatus.PROCESSING,
-        status: TransactionStatus.PROCESSING,
-      })
-      .where('id = :id', { id: transaction.id })
-      .andWhere('bank_status = :bankStatus', {
-        bankStatus: BankProcessingStatus.NOT_STARTED,
-      })
-      .andWhere('provider_status IN (:...statuses)', {
-        statuses: [ProviderStatus.INITIATED, ProviderStatus.PENDING],
-      })
-      .execute();
+    const before = stateOf(transaction);
 
-    const updated = await this.transactions.findOneByOrFail({ id: transaction.id });
+    // La commission n'est acquise que sur un encaissement conforme : elle est
+    // figee ici, avec la confirmation, et jamais recalculee ensuite. Un taux qui
+    // evolue ne doit pas deplacer des ecritures comptables deja passees.
+    const feeAmount = roundToCent(webhook.amount * this.config.feeRate);
 
-    if (outcome.affected === 1) {
-      await this.events.record({
-        type: TransactionEventType.PROVIDER_CONFIRMED,
-        transaction: updated,
-        observedAmount: webhook.amount,
-        observedCurrency: webhook.currency,
-        detail: 'Encaissement fournisseur conforme a la commande',
+    // La prise du droit d'appeler la banque et la consignation de la
+    // confirmation sont indissociables : une prise sans fait laisserait un
+    // trou dans le registre, precisement sur la transition qui autorise un
+    // mouvement de fonds.
+    return this.dataSource.transaction(async (manager) => {
+      const outcome = await manager
+        .createQueryBuilder()
+        .update(Transaction)
+        .set({
+          providerStatus: ProviderStatus.CONFIRMED,
+          aggregatorAmount: webhook.amount,
+          aggregatorCurrency: webhook.currency,
+          mobileMoneyConfirmedAt: new Date(webhook.occurredAt),
+          feeAmount,
+          bankStatus: BankProcessingStatus.PROCESSING,
+          status: TransactionStatus.PROCESSING,
+        })
+        .where('id = :id', { id: transaction.id })
+        .andWhere('bank_status = :bankStatus', {
+          bankStatus: BankProcessingStatus.NOT_STARTED,
+        })
+        .andWhere('provider_status IN (:...statuses)', {
+          statuses: [ProviderStatus.INITIATED, ProviderStatus.PENDING],
+        })
+        .execute();
+
+      const updated = await manager.getRepository(Transaction).findOneByOrFail({
+        id: transaction.id,
       });
-    }
 
-    return { transaction: updated, claimed: outcome.affected === 1 };
+      if (outcome.affected === 1) {
+        // Controle a l'interieur de la transaction : une transition refusee
+        // annule l'ecriture au lieu de la constater apres coup. Le registre
+        // etant append-only, un etat impossible consigne ne se corrige plus.
+        this.stateMachine.assertTransition(before, stateOf(updated), updated.reference);
+
+        await this.events.record(
+          {
+            type: TransactionEventType.PROVIDER_CONFIRMED,
+            transaction: updated,
+            observedAmount: webhook.amount,
+            observedCurrency: webhook.currency,
+            detail: 'Encaissement fournisseur conforme a la commande',
+          },
+          manager,
+        );
+      }
+
+      return { transaction: updated, claimed: outcome.affected === 1 };
+    });
   }
 
   /**
@@ -226,119 +270,147 @@ export class MobileMoneyService {
       `Commande ${Number(transaction.amount).toFixed(2)} ${transaction.currency}, ` +
       `confirmation ${Number(webhook.amount).toFixed(2)} ${webhook.currency}`;
 
-    const outcome = await this.transactions
-      .createQueryBuilder()
-      .update(Transaction)
-      .set({
-        // Le payeur a bien ete debite : la jambe fournisseur est un succes, et
-        // le rester est ce qui rend l'obligation de remboursement lisible.
-        providerStatus: ProviderStatus.CONFIRMED,
-        aggregatorAmount: webhook.amount,
-        aggregatorCurrency: webhook.currency,
-        mobileMoneyConfirmedAt: new Date(webhook.occurredAt),
+    const before = stateOf(transaction);
 
-        // Refus assume d'instruire la banque, distinct d'un rejet subi.
-        bankStatus: BankProcessingStatus.BLOCKED,
+    // Les trois faits consignes plus bas decrivent une meme decision. Les ecrire
+    // hors transaction exposerait a n'en conserver qu'une partie : un ecart
+    // constate sans dette ouverte, par exemple, serait un registre trompeur.
+    return this.dataSource.transaction(async (manager) => {
+      const outcome = await manager
+        .createQueryBuilder()
+        .update(Transaction)
+        .set({
+          // Le payeur a bien ete debite : la jambe fournisseur est un succes, et
+          // le rester est ce qui rend l'obligation de remboursement lisible.
+          providerStatus: ProviderStatus.CONFIRMED,
+          aggregatorAmount: webhook.amount,
+          aggregatorCurrency: webhook.currency,
+          mobileMoneyConfirmedAt: new Date(webhook.occurredAt),
 
-        // Le virement, lui, n'a pas eu lieu.
-        status: TransactionStatus.FAILED,
-        processedAt: new Date(),
-        failureReason: 'Confirmation Mobile Money incoherente avec la commande',
+          // Refus assume d'instruire la banque, distinct d'un rejet subi.
+          bankStatus: BankProcessingStatus.BLOCKED,
 
-        reconciliationStatus: currencyDiverges
-          ? ReconciliationStatus.CURRENCY_MISMATCH
-          : ReconciliationStatus.AMOUNT_MISMATCH,
-        reconciliationReason: reason,
+          // Le virement, lui, n'a pas eu lieu.
+          status: TransactionStatus.FAILED,
+          processedAt: new Date(),
+          failureReason: 'Confirmation Mobile Money incoherente avec la commande',
 
-        // Encaisse sans contrepartie livree : une dette est nee.
-        refundStatus: RefundStatus.REQUIRED,
-        caseStatus: CaseStatus.MANUAL_REVIEW,
-        caseReason: `Ecart entre commande et confirmation fournisseur. ${reason}`,
-      })
-      .where('id = :id', { id: transaction.id })
-      .andWhere('bank_status = :bankStatus', {
-        bankStatus: BankProcessingStatus.NOT_STARTED,
-      })
-      .execute();
+          reconciliationStatus: currencyDiverges
+            ? ReconciliationStatus.CURRENCY_MISMATCH
+            : ReconciliationStatus.AMOUNT_MISMATCH,
+          reconciliationReason: reason,
 
-    const updated = await this.transactions.findOneByOrFail({ id: transaction.id });
-    // Une autre notification a deja fait evoluer la transaction. Ne jamais
-    // consigner un ecart qui n'a pas ete applique a l'etat courant.
-    if (outcome.affected !== 1) return updated;
+          // Encaisse sans contrepartie livree : une dette est nee.
+          refundStatus: RefundStatus.REQUIRED,
+          caseStatus: CaseStatus.MANUAL_REVIEW,
+          caseReason: `Ecart entre commande et confirmation fournisseur. ${reason}`,
+        })
+        .where('id = :id', { id: transaction.id })
+        .andWhere('bank_status = :bankStatus', {
+          bankStatus: BankProcessingStatus.NOT_STARTED,
+        })
+        .execute();
 
-    this.logger.warn({
-      event: 'mobile-money.amount-mismatch',
-      reference: transaction.reference,
-      orderedAmount: Number(transaction.amount),
-      orderedCurrency: transaction.currency,
-      confirmedAmount: Number(webhook.amount),
-      confirmedCurrency: webhook.currency,
-      detail: 'Instruction bancaire bloquee, remboursement requis',
-    });
-
-    // Trois faits distincts : ce qui a ete constate, ce qui a ete refuse, et ce
-    // qui est desormais du. Les fondre en un seul rendrait l'historique moins
-    // lisible qu'il ne doit l'etre pour trancher un litige.
-    for (const [type, detail] of [
-      [TransactionEventType.AMOUNT_MISMATCH_DETECTED, reason],
-      [TransactionEventType.BANK_PROCESSING_BLOCKED, 'Instruction bancaire non emise'],
-      [TransactionEventType.CASE_OPENED, 'Remboursement du payeur a instruire'],
-    ] as const) {
-      await this.events.record({
-        type,
-        transaction: updated,
-        observedAmount: webhook.amount,
-        observedCurrency: webhook.currency,
-        detail,
+      const updated = await manager.getRepository(Transaction).findOneByOrFail({
+        id: transaction.id,
       });
-    }
+      // Une autre notification a deja fait evoluer la transaction. Ne jamais
+      // consigner un ecart qui n'a pas ete applique a l'etat courant.
+      if (outcome.affected !== 1) return updated;
 
-    return updated;
+      this.stateMachine.assertTransition(before, stateOf(updated), updated.reference);
+
+      this.logger.warn({
+        event: 'mobile-money.amount-mismatch',
+        reference: transaction.reference,
+        orderedAmount: Number(transaction.amount),
+        orderedCurrency: transaction.currency,
+        confirmedAmount: Number(webhook.amount),
+        confirmedCurrency: webhook.currency,
+        detail: 'Instruction bancaire bloquee, remboursement requis',
+      });
+
+      // Trois faits distincts : ce qui a ete constate, ce qui a ete refuse, et ce
+      // qui est desormais du. Les fondre en un seul rendrait l'historique moins
+      // lisible qu'il ne doit l'etre pour trancher un litige.
+      for (const [type, detail] of [
+        [TransactionEventType.AMOUNT_MISMATCH_DETECTED, reason],
+        [TransactionEventType.BANK_PROCESSING_BLOCKED, 'Instruction bancaire non emise'],
+        [TransactionEventType.CASE_OPENED, 'Remboursement du payeur a instruire'],
+      ] as const) {
+        await this.events.record(
+          {
+            type,
+            transaction: updated,
+            observedAmount: webhook.amount,
+            observedCurrency: webhook.currency,
+            detail,
+          },
+          manager,
+        );
+      }
+
+      return updated;
+    });
   }
 
   async markProviderFailed(
     transaction: Transaction,
     webhook: MobileMoneyWebhookDto,
   ): Promise<Transaction> {
-    const outcome = await this.transactions
-      .createQueryBuilder()
-      .update(Transaction)
-      .set({
-        providerStatus: ProviderStatus.FAILED,
-        aggregatorAmount: webhook.amount,
-        aggregatorCurrency: webhook.currency,
-        status: TransactionStatus.FAILED,
-        processedAt: new Date(),
-        failureReason: webhook.failureReason ?? 'Paiement refuse par l operateur Mobile Money',
+    const before = stateOf(transaction);
 
-        // Rien n'a ete encaisse : il n'y a aucune jambe a rapprocher, aucune
-        // dette envers le payeur, et donc aucun dossier a instruire. C'est un
-        // echec propre — le confondre avec un litige noierait les vrais dossiers.
-        reconciliationStatus: ReconciliationStatus.NOT_APPLICABLE,
-        reconciliationReason: 'Aucun encaissement fournisseur : rien a rapprocher',
-        refundStatus: RefundStatus.NOT_REQUIRED,
-        caseStatus: CaseStatus.NONE,
-      })
-      .where('id = :id', { id: transaction.id })
-      .andWhere('bank_status = :bankStatus', {
-        bankStatus: BankProcessingStatus.NOT_STARTED,
-      })
-      .execute();
+    // Le refus est une issue finale, donc immediatement close. Etat terminal et
+    // cloture doivent apparaitre ensemble : la verification deduit de l'un que
+    // l'autre est attendu, et conclurait sinon a une troncature du registre.
+    return this.dataSource.transaction(async (manager) => {
+      const outcome = await manager
+        .createQueryBuilder()
+        .update(Transaction)
+        .set({
+          providerStatus: ProviderStatus.FAILED,
+          aggregatorAmount: webhook.amount,
+          aggregatorCurrency: webhook.currency,
+          status: TransactionStatus.FAILED,
+          processedAt: new Date(),
+          failureReason: webhook.failureReason ?? 'Paiement refuse par l operateur Mobile Money',
 
-    const updated = await this.transactions.findOneByOrFail({ id: transaction.id });
-    if (outcome.affected !== 1) return updated;
+          // Rien n'a ete encaisse : il n'y a aucune jambe a rapprocher, aucune
+          // dette envers le payeur, et donc aucun dossier a instruire. C'est un
+          // echec propre — le confondre avec un litige noierait les vrais dossiers.
+          reconciliationStatus: ReconciliationStatus.NOT_APPLICABLE,
+          reconciliationReason: 'Aucun encaissement fournisseur : rien a rapprocher',
+          refundStatus: RefundStatus.NOT_REQUIRED,
+          caseStatus: CaseStatus.NONE,
+        })
+        .where('id = :id', { id: transaction.id })
+        .andWhere('bank_status = :bankStatus', {
+          bankStatus: BankProcessingStatus.NOT_STARTED,
+        })
+        .execute();
 
-    await this.events.record({
-      type: TransactionEventType.PROVIDER_FAILED,
-      transaction: updated,
-      observedAmount: webhook.amount,
-      observedCurrency: webhook.currency,
-      detail: webhook.failureReason ?? 'Paiement refuse par l operateur',
+      const updated = await manager.getRepository(Transaction).findOneByOrFail({
+        id: transaction.id,
+      });
+      if (outcome.affected !== 1) return updated;
+
+      this.stateMachine.assertTransition(before, stateOf(updated), updated.reference);
+
+      await this.events.record(
+        {
+          type: TransactionEventType.PROVIDER_FAILED,
+          transaction: updated,
+          observedAmount: webhook.amount,
+          observedCurrency: webhook.currency,
+          detail: webhook.failureReason ?? 'Paiement refuse par l operateur',
+        },
+        manager,
+      );
+      // Aucun fonds n'a ete encaisse et aucune jambe bancaire n'a ete lancee :
+      // ce refus est une issue finale, donc sa synthese peut etre ancree.
+      await this.events.closeCase(updated, 'Dossier clos apres refus de l operateur', manager);
+      return updated;
     });
-    // Aucun fonds n'a ete encaisse et aucune jambe bancaire n'a ete lancee :
-    // ce refus est une issue finale, donc sa synthese peut etre ancree.
-    await this.events.closeCase(updated, 'Dossier clos apres refus de l operateur');
-    return updated;
   }
 
   private assertBusinessRules(dto: CreateMobileMoneyTransactionDto): void {

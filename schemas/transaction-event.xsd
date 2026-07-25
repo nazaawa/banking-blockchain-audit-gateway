@@ -76,6 +76,7 @@
       <xs:enumeration value="REFUND_REOPENED"/>
       <xs:enumeration value="REFUND_COMPLETED"/>
       <xs:enumeration value="REFUND_FAILED"/>
+      <xs:enumeration value="SETTLEMENT_SWEPT"/>
     </xs:restriction>
   </xs:simpleType>
 

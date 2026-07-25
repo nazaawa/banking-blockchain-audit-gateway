@@ -213,6 +213,23 @@ export class Transaction {
   @Column({ name: 'aggregator_currency', type: 'char', length: 3, nullable: true })
   aggregatorCurrency!: string | null;
 
+  /**
+   * Commission retenue par la passerelle, **figee** a la confirmation.
+   *
+   * Elle est stockee plutot que recalculee : le taux est une donnee de
+   * configuration, susceptible de changer. Recalculer a la lecture ferait
+   * varier retroactivement des ecritures comptables deja passees.
+   */
+  @Column({
+    name: 'fee_amount',
+    type: 'numeric',
+    precision: 18,
+    scale: 2,
+    transformer: numericTransformer,
+    default: 0,
+  })
+  feeAmount!: number;
+
   @Column({ name: 'mobile_money_confirmed_at', type: 'timestamptz', nullable: true })
   mobileMoneyConfirmedAt!: Date | null;
 

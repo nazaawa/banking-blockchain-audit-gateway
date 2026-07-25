@@ -6,9 +6,9 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
-import { InjectRepository } from '@nestjs/typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { QueryFailedError, Repository } from 'typeorm';
+import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { AuditService } from '../audit/audit.service';
@@ -17,6 +17,8 @@ import { mobileMoneyConfig } from '../config/configuration';
 import { SoapCommunicationException, SoapFaultException } from '../soap/exceptions/soap.exceptions';
 import { SoapClientService } from '../soap/soap-client.service';
 import { Transaction } from '../transactions/entities/transaction.entity';
+import { stateOf, TransactionStateMachine } from '../transactions/state/transaction-state.machine';
+import type { TransactionState } from '../transactions/state/transaction-state';
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
 import { MobileMoneyWebhookDto, MobileMoneyWebhookStatus } from './dto/mobile-money-webhook.dto';
 import { MobileMoneyWebhookEvent } from './entities/mobile-money-webhook-event.entity';
@@ -54,6 +56,9 @@ export class MobileMoneyWebhookService {
     private readonly auditService: AuditService,
     private readonly reconciliation: ReconciliationService,
     private readonly eventLedger: TransactionEventsService,
+    private readonly stateMachine: TransactionStateMachine,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
     @Inject(mobileMoneyConfig.KEY)
     private readonly config: ConfigType<typeof mobileMoneyConfig>,
   ) {}
@@ -233,11 +238,14 @@ export class MobileMoneyWebhookService {
   }
 
   private async callBankAndReconcile(transaction: Transaction): Promise<Transaction> {
+    // Capture avant toute mutation : les deux issues ci-dessous modifient
+    // l'entite en place, et l'etat de depart serait sinon deja perdu.
+    const before = stateOf(transaction);
     let bankResult: Awaited<ReturnType<SoapClientService['convertAmountToWords']>>;
     try {
       bankResult = await this.soapClient.convertAmountToWords(Number(transaction.amount));
     } catch (error) {
-      return this.handleBankFailure(transaction, error);
+      return this.handleBankFailure(transaction, before, error);
     }
 
     const { amountInWords, exchange } = bankResult;
@@ -269,12 +277,26 @@ export class MobileMoneyWebhookService {
     transaction.soapDurationMs = exchange.durationMs;
     transaction.soapAttempts = exchange.attempts;
     transaction.processedAt = new Date();
-    const completed = await this.transactions.save(transaction);
-    await this.eventLedger.record({
-      type: TransactionEventType.BANK_PROCESSING_COMPLETED,
-      transaction: completed,
-      detail: `Instruction bancaire executee en ${exchange.durationMs} ms`,
+    const completed = await this.dataSource.transaction(async (manager) => {
+      const persisted = await manager.getRepository(Transaction).save(transaction);
+      this.stateMachine.assertTransition(before, stateOf(persisted), persisted.reference);
+
+      await this.eventLedger.record(
+        {
+          type: TransactionEventType.BANK_PROCESSING_COMPLETED,
+          transaction: persisted,
+          detail: `Instruction bancaire executee en ${exchange.durationMs} ms`,
+        },
+        manager,
+      );
+
+      return persisted;
     });
+
+    // Le rapprochement reste **hors** de la transaction ci-dessus, et porte la
+    // sienne. La banque a reellement execute : un incident au rapprochement ne
+    // doit pas effacer ce fait. Le dossier restera simplement a rapprocher, ce
+    // que `runPending` reprend.
     return this.reconciliation.reconcile(completed);
   }
 
@@ -285,7 +307,11 @@ export class MobileMoneyWebhookService {
    * d'evenements ou le rapprochement : un incident local apres une reponse SOAP
    * positive ne signifie pas que la banque a echoue.
    */
-  private async handleBankFailure(transaction: Transaction, error: unknown): Promise<Transaction> {
+  private async handleBankFailure(
+    transaction: Transaction,
+    before: TransactionState,
+    error: unknown,
+  ): Promise<Transaction> {
     transaction.status = TransactionStatus.FAILED;
     transaction.bankStatus = BankProcessingStatus.FAILED;
     transaction.reconciliationStatus = ReconciliationStatus.MANUAL_REVIEW;
@@ -334,18 +360,33 @@ export class MobileMoneyWebhookService {
     });
     // Le callback est acquitte : l'echec bancaire est un etat metier durable,
     // pas une raison de demander a l'agregateur de rejouer le paiement.
-    const failed = await this.transactions.save(transaction);
-    await this.eventLedger.record({
-      type: TransactionEventType.BANK_PROCESSING_FAILED,
-      transaction: failed,
-      detail: failed.failureReason,
+    //
+    // L'echec et la dette qu'il ouvre sont ecrits d'un bloc : l'encaissement a
+    // eu lieu sans contrepartie, et un etat qui porterait l'echec sans le
+    // dossier de remboursement laisserait cette dette sans trace opposable.
+    return this.dataSource.transaction(async (manager) => {
+      const failed = await manager.getRepository(Transaction).save(transaction);
+      this.stateMachine.assertTransition(before, stateOf(failed), failed.reference);
+
+      await this.eventLedger.record(
+        {
+          type: TransactionEventType.BANK_PROCESSING_FAILED,
+          transaction: failed,
+          detail: failed.failureReason,
+        },
+        manager,
+      );
+      await this.eventLedger.record(
+        {
+          type: TransactionEventType.CASE_OPENED,
+          transaction: failed,
+          detail: failed.caseReason,
+        },
+        manager,
+      );
+
+      return failed;
     });
-    await this.eventLedger.record({
-      type: TransactionEventType.CASE_OPENED,
-      transaction: failed,
-      detail: failed.caseReason,
-    });
-    return failed;
   }
 
   /**

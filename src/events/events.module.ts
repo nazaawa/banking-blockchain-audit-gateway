@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AccountingModule } from '../accounting/accounting.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BlockchainModule } from '../blockchain/blockchain.module';
 import { AnchorBatch } from '../blockchain/entities/anchor-batch.entity';
@@ -20,6 +21,7 @@ import { Transaction } from '../transactions/entities/transaction.entity';
  */
 @Module({
   imports: [
+    AccountingModule,
     TypeOrmModule.forFeature([TransactionEvent, AnchorBatch, Transaction]),
     BlockchainModule,
     XmlModule,

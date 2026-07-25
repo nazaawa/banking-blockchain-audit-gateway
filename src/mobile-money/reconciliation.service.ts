@@ -1,10 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { amountsMatch, currenciesMatch } from './amount.util';
 import { Transaction } from '../transactions/entities/transaction.entity';
+import { stateOf, TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import {
   BankProcessingStatus,
   ProviderStatus,
@@ -21,10 +22,15 @@ export class ReconciliationService {
     @InjectRepository(Transaction)
     private readonly transactions: Repository<Transaction>,
     private readonly events: TransactionEventsService,
+    private readonly stateMachine: TransactionStateMachine,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
 
   async reconcile(transaction: Transaction): Promise<Transaction> {
     if (transaction.paymentChannel !== PaymentChannel.MOBILE_MONEY) return transaction;
+
+    const before = stateOf(transaction);
 
     // Rejeu apres un incident local survenu entre le verdict et la cloture :
     // ne pas recreer RECONCILIATION_MATCHED, mais reparer idempotemment la
@@ -69,22 +75,38 @@ export class ReconciliationService {
             .filter(Boolean)
             .join('; ');
 
-    const reconciled = await this.transactions.save(transaction);
-    await this.events.record({
-      type:
-        reconciled.reconciliationStatus === ReconciliationStatus.MATCHED
-          ? TransactionEventType.RECONCILIATION_MATCHED
-          : TransactionEventType.RECONCILIATION_MISMATCH,
-      transaction: reconciled,
-      observedAmount: reconciled.aggregatorAmount,
-      observedCurrency: reconciled.aggregatorCurrency,
-      detail: reconciled.reconciliationReason,
+    // Verdict et fait consigne ne peuvent pas diverger : c'est le rapprochement
+    // qui autorise l'ancrage, et un verdict sans son fait rendrait le registre
+    // incapable de justifier ce qui a ete publie.
+    const reconciled = await this.dataSource.transaction(async (manager) => {
+      const persisted = await manager.getRepository(Transaction).save(transaction);
+      this.stateMachine.assertTransition(before, stateOf(persisted), persisted.reference);
+
+      await this.events.record(
+        {
+          type:
+            persisted.reconciliationStatus === ReconciliationStatus.MATCHED
+              ? TransactionEventType.RECONCILIATION_MATCHED
+              : TransactionEventType.RECONCILIATION_MISMATCH,
+          transaction: persisted,
+          observedAmount: persisted.aggregatorAmount,
+          observedCurrency: persisted.aggregatorCurrency,
+          detail: persisted.reconciliationReason,
+        },
+        manager,
+      );
+      // Un rapprochement conforme cloture le dossier : le virement a abouti et
+      // rien d'autre n'est attendu. Un ecart, lui, laisse le dossier ouvert.
+      if (persisted.reconciliationStatus === ReconciliationStatus.MATCHED) {
+        await this.events.closeCase(
+          persisted,
+          'Dossier clos apres rapprochement conforme',
+          manager,
+        );
+      }
+
+      return persisted;
     });
-    // Un rapprochement conforme cloture le dossier : le virement a abouti et
-    // rien d'autre n'est attendu. Un ecart, lui, laisse le dossier ouvert.
-    if (reconciled.reconciliationStatus === ReconciliationStatus.MATCHED) {
-      await this.events.closeCase(reconciled, 'Dossier clos apres rapprochement conforme');
-    }
 
     this.logger.log({
       event: 'mobile-money.reconciled',

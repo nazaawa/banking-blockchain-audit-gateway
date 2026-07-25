@@ -11,6 +11,8 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { businessConfig } from '../config/configuration';
 import { getCorrelationId } from '../common/context/request-context';
 import { AuditService } from '../audit/audit.service';
@@ -29,6 +31,8 @@ import { Transaction } from './entities/transaction.entity';
 import { TransactionStatus } from './enums/transaction-status.enum';
 import { ReferenceGenerator } from './reference.generator';
 import { TransactionsRepository } from './transactions.repository';
+import { stateOf, TransactionStateMachine } from './state/transaction-state.machine';
+import type { TransactionState } from './state/transaction-state';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { TransferXmlBuilder } from '../xml/transfer-xml.builder';
@@ -60,8 +64,11 @@ export class TransactionsService {
     private readonly xmlBuilder: TransferXmlBuilder,
     private readonly xsdValidator: XsdValidatorService,
     private readonly events: TransactionEventsService,
+    private readonly stateMachine: TransactionStateMachine,
     @Inject(businessConfig.KEY)
     private readonly config: ConfigType<typeof businessConfig>,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -96,12 +103,6 @@ export class TransactionsService {
     // prise en charge par l'autre requete. La rejouer emettrait un second appel
     // SOAP pour un seul virement.
     if (!isNew) return transaction;
-
-    await this.events.record({
-      type: TransactionEventType.TRANSFER_INITIATED,
-      transaction,
-      detail: 'Virement enregistre, avant appel au back-office',
-    });
 
     return this.processTransaction(transaction, requestXml);
   }
@@ -240,7 +241,25 @@ export class TransactionsService {
       });
 
       try {
-        const saved = await this.repository.save(transaction);
+        // L'enregistrement et sa consignation forment un tout : une transaction
+        // qui existerait sans son fait d'ouverture ferait echouer la
+        // verification d'integrite, laquelle ne peut pas distinguer un incident
+        // local d'une suppression malveillante.
+        const saved = await this.dataSource.transaction(async (manager) => {
+          const persisted = await this.repository.save(transaction, manager);
+          this.stateMachine.assertInitialState(stateOf(persisted), persisted.reference);
+
+          await this.events.record(
+            {
+              type: TransactionEventType.TRANSFER_INITIATED,
+              transaction: persisted,
+              detail: 'Virement enregistre, avant appel au back-office',
+            },
+            manager,
+          );
+
+          return persisted;
+        });
 
         this.logger.log({
           event: 'transfer.registered',
@@ -292,6 +311,10 @@ export class TransactionsService {
     transaction: Transaction,
     requestXml: string,
   ): Promise<Transaction> {
+    // Capture avant toute mutation : l'entite evolue en place, et l'etat de
+    // depart serait sinon perdu au moment de valider la transition.
+    const before = stateOf(transaction);
+
     transaction.status = TransactionStatus.PROCESSING;
     await this.repository.save(transaction);
 
@@ -340,7 +363,25 @@ export class TransactionsService {
       transaction.soapAttempts = exchange.attempts;
       transaction.processedAt = new Date();
 
-      const completed = await this.repository.save(transaction);
+      // L'appel SOAP est termine : la transaction SQL n'englobe que des
+      // ecritures locales, et ne reste jamais ouverte pendant un appel reseau.
+      const completed = await this.dataSource.transaction(async (manager) => {
+        const persisted = await this.repository.save(transaction, manager);
+        this.stateMachine.assertTransition(before, stateOf(persisted), persisted.reference);
+
+        await this.events.record(
+          {
+            type: TransactionEventType.TRANSFER_COMPLETED,
+            transaction: persisted,
+            detail: `Back-office traite en ${exchange.durationMs} ms`,
+          },
+          manager,
+        );
+        // Le flux classique n'a qu'une jambe : l'aboutissement clot le dossier.
+        await this.events.closeCase(persisted, 'Dossier clos apres virement abouti', manager);
+
+        return persisted;
+      });
 
       this.logger.log({
         event: 'transfer.completed',
@@ -349,17 +390,9 @@ export class TransactionsService {
         durationMs: exchange.durationMs,
       });
 
-      await this.events.record({
-        type: TransactionEventType.TRANSFER_COMPLETED,
-        transaction: completed,
-        detail: `Back-office traite en ${exchange.durationMs} ms`,
-      });
-      // Le flux classique n'a qu'une jambe : l'aboutissement clot le dossier.
-      await this.events.closeCase(completed, 'Dossier clos apres virement abouti');
-
       return completed;
     } catch (error) {
-      return this.handleProcessingFailure(transaction, error);
+      return this.handleProcessingFailure(transaction, before, error);
     }
   }
 
@@ -368,7 +401,11 @@ export class TransactionsService {
    * d'integration en reponse HTTP porteuse de la reference : le client peut
    * toujours interroger `GET /transfers/{reference}`.
    */
-  private async handleProcessingFailure(transaction: Transaction, error: unknown): Promise<never> {
+  private async handleProcessingFailure(
+    transaction: Transaction,
+    before: TransactionState,
+    error: unknown,
+  ): Promise<never> {
     transaction.status = TransactionStatus.FAILED;
     transaction.processedAt = new Date();
 
@@ -378,7 +415,7 @@ export class TransactionsService {
       transaction.faultString = error.fault.faultString;
       transaction.failureReason = error.message;
 
-      await this.persistFailedTransaction(transaction);
+      await this.persistFailedTransaction(transaction, before);
       await this.auditService.record({
         direction: AuditDirection.INBOUND_FAULT,
         outcome: AuditOutcome.FAULT,
@@ -417,7 +454,7 @@ export class TransactionsService {
       transaction.soapAttempts = error.attempts;
       transaction.failureReason = error.message;
 
-      await this.persistFailedTransaction(transaction);
+      await this.persistFailedTransaction(transaction, before);
       await this.auditService.record({
         direction: AuditDirection.COMMUNICATION_ERROR,
         outcome: AuditOutcome.ERROR,
@@ -453,7 +490,7 @@ export class TransactionsService {
       transaction.soapOperation = error.operation;
       transaction.failureReason = error.message;
 
-      await this.persistFailedTransaction(transaction);
+      await this.persistFailedTransaction(transaction, before);
       await this.auditService.record({
         direction: AuditDirection.COMMUNICATION_ERROR,
         outcome: AuditOutcome.ERROR,
@@ -481,7 +518,7 @@ export class TransactionsService {
 
     // Erreur non prevue : on marque l'echec sans divulguer le detail technique.
     transaction.failureReason = 'Erreur interne pendant le traitement';
-    await this.persistFailedTransaction(transaction);
+    await this.persistFailedTransaction(transaction, before);
 
     this.logger.error({
       event: 'transfer.failed',
@@ -499,18 +536,33 @@ export class TransactionsService {
     });
   }
 
-  /** Persiste un echec puis consigne et clot sa chaine de faits. */
-  private async persistFailedTransaction(transaction: Transaction): Promise<Transaction> {
-    const saved = await this.repository.save(transaction);
+  /**
+   * Persiste un echec puis consigne et clot sa chaine de faits, indissociablement.
+   *
+   * Un echec consigne a moitie serait le pire des cas : la ligne porterait un
+   * etat terminal, la verification en deduirait qu'une cloture est attendue, et
+   * conclurait a une troncature du registre.
+   */
+  private async persistFailedTransaction(
+    transaction: Transaction,
+    before: TransactionState,
+  ): Promise<Transaction> {
+    return this.dataSource.transaction(async (manager) => {
+      const saved = await this.repository.save(transaction, manager);
+      this.stateMachine.assertTransition(before, stateOf(saved), saved.reference);
 
-    await this.events.record({
-      type: TransactionEventType.TRANSFER_FAILED,
-      transaction: saved,
-      detail: saved.failureReason,
+      await this.events.record(
+        {
+          type: TransactionEventType.TRANSFER_FAILED,
+          transaction: saved,
+          detail: saved.failureReason,
+        },
+        manager,
+      );
+      // Un echec est terminal : rien d'autre n'est attendu sur ce dossier.
+      await this.events.closeCase(saved, 'Dossier clos apres echec du virement', manager);
+
+      return saved;
     });
-    // Un echec est terminal : rien d'autre n'est attendu sur ce dossier.
-    await this.events.closeCase(saved, 'Dossier clos apres echec du virement');
-
-    return saved;
   }
 }

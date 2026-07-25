@@ -81,6 +81,14 @@ export const mobileMoneyConfig = registerAs('mobileMoney', () => ({
    */
   settlementIban: process.env.MOBILE_MONEY_SETTLEMENT_IBAN ?? 'FR7630006000011234567890189',
   settlementName: process.env.MOBILE_MONEY_SETTLEMENT_NAME ?? 'Mobile Money Settlement',
+  /**
+   * Commission retenue par la passerelle sur un encaissement conforme.
+   *
+   * Exprimee en fraction (0.015 = 1,5 %). Le montant calcule est **fige** sur la
+   * transaction a la confirmation : une evolution du taux ne doit pas modifier
+   * retroactivement des ecritures comptables deja passees.
+   */
+  feeRate: toFloat(process.env.MOBILE_MONEY_FEE_RATE, 0.015),
   /** Secret partage utilise pour authentifier les callbacks HMAC SHA-256. */
   webhookSecret: process.env.MOBILE_MONEY_WEBHOOK_SECRET ?? 'local-demo-webhook-secret',
   simulatorEnabled: toBool(

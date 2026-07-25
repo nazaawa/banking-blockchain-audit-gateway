@@ -7,6 +7,8 @@ import { TransactionEvent } from '../events/entities/transaction-event.entity';
 import { Refund } from '../refunds/entities/refund.entity';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { MobileMoneyWebhookEvent } from '../mobile-money/entities/mobile-money-webhook-event.entity';
+import { JournalEntry } from '../accounting/entities/journal-entry.entity';
+import { JournalLine } from '../accounting/entities/journal-line.entity';
 
 loadEnv();
 
@@ -23,7 +25,16 @@ export default new DataSource({
   username: process.env.DB_USERNAME ?? 'banking',
   password: process.env.DB_PASSWORD ?? 'banking',
   database: process.env.DB_NAME ?? 'banking_soap',
-  entities: [Transaction, AuditLog, AnchorBatch, MobileMoneyWebhookEvent, TransactionEvent, Refund],
+  entities: [
+    Transaction,
+    AuditLog,
+    AnchorBatch,
+    MobileMoneyWebhookEvent,
+    TransactionEvent,
+    Refund,
+    JournalEntry,
+    JournalLine,
+  ],
   migrations: ['src/database/migrations/*.ts'],
   synchronize: false,
   logging: false,
