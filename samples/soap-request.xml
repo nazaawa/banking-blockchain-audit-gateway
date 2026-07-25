@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Requete SOAP 1.1 emise par SoapClientService vers l'operation NumberToDollars.
+  Capturee via le tableau resolu par node-soap : [result, rawResponse, soapHeader, rawRequest].
+
+  Le montant transmis est celui de la transaction ; aucune donnee de compte
+  (IBAN, nom du beneficiaire) n'est envoyee au fournisseur externe.
+-->
+<soap:Envelope
+    xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Body>
+    <NumberToDollars xmlns="http://www.dataaccess.com/webservicesserver/">
+      <dNum>1250.75</dNum>
+    </NumberToDollars>
+  </soap:Body>
+</soap:Envelope>

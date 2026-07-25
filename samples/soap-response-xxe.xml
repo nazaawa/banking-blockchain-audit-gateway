@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Payload hostile utilise par les tests de securite du parseur.
+
+  Une declaration DOCTYPE/ENTITY permet, selon le parseur, la lecture de
+  fichiers locaux (XXE) ou l'expansion exponentielle d'entites (billion laughs).
+  SoapResponseMapper rejette ce document AVANT parsing et leve une
+  SoapParsingException.
+-->
+<!DOCTYPE Envelope [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <m:NumberToDollarsResponse xmlns:m="http://www.dataaccess.com/webservicesserver/">
+      <m:NumberToDollarsResult>&xxe;</m:NumberToDollarsResult>
+    </m:NumberToDollarsResponse>
+  </soap:Body>
+</soap:Envelope>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Reponse nominale reelle du service DataAccess Number Conversion.
+
+  Point d'attention : le fournisseur prefixe les elements du corps avec `m:`.
+  Le mapper applique `processors.stripPrefix` pour rester independant du
+  prefixe choisi (`m:`, `ns1:`, ou aucun).
+-->
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <m:NumberToDollarsResponse xmlns:m="http://www.dataaccess.com/webservicesserver/">
+      <m:NumberToDollarsResult>one thousand two hundred and fifty dollars and seventy five cents</m:NumberToDollarsResult>
+    </m:NumberToDollarsResponse>
+  </soap:Body>
+</soap:Envelope>

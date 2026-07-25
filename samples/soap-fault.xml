@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Faute SOAP 1.1 : le service a repondu (HTTP 500) mais le traitement a echoue.
+
+  Traitement attendu :
+    SoapResponseMapper.extractFault -> SoapFaultException
+    -> transaction FAILED (faultCode / faultString persistes)
+    -> reponse HTTP 502 SOAP_FAULT portant la reference du virement.
+-->
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+  <soap:Body>
+    <soap:Fault>
+      <faultcode>soap:Server</faultcode>
+      <faultstring>Server was unable to process request. ---&gt; Value was either too large or too small for a Decimal.</faultstring>
+      <faultactor>http://www.dataaccess.com/webservicesserver/NumberConversion.wso</faultactor>
+      <detail>
+        <ErrorCode>NUMBER_OUT_OF_RANGE</ErrorCode>
+      </detail>
+    </soap:Fault>
+  </soap:Body>
+</soap:Envelope>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Meme incident, exprime en SOAP 1.2 : la structure de la faute differe
+  (Code/Value + Reason/Text au lieu de faultcode + faultstring).
+
+  Le WSDL du fournisseur expose les deux bindings ; le mapper normalise les
+  deux formes vers la meme structure `SoapFaultDetails`.
+-->
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+  <soap:Body>
+    <soap:Fault>
+      <soap:Code>
+        <soap:Value>soap:Sender</soap:Value>
+        <soap:Subcode>
+          <soap:Value>rpc:BadArguments</soap:Value>
+        </soap:Subcode>
+      </soap:Code>
+      <soap:Reason>
+        <soap:Text xml:lang="en">Value was either too large or too small for a Decimal.</soap:Text>
+      </soap:Reason>
+      <soap:Role>http://www.dataaccess.com/webservicesserver/NumberConversion.wso</soap:Role>
+      <soap:Detail>
+        <ErrorCode>NUMBER_OUT_OF_RANGE</ErrorCode>
+      </soap:Detail>
+    </soap:Fault>
+  </soap:Body>
+</soap:Envelope>
