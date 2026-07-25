@@ -37,6 +37,8 @@ export enum TransactionEventType {
 
   // --- Remboursement (phase 3) ----------------------------------------------
   REFUND_REQUESTED = 'REFUND_REQUESTED',
+  /** Dossier rouvert apres un refus metier resolu hors systeme. */
+  REFUND_REOPENED = 'REFUND_REOPENED',
   REFUND_COMPLETED = 'REFUND_COMPLETED',
   REFUND_FAILED = 'REFUND_FAILED',
 }

@@ -1,10 +1,10 @@
-import type { Repository } from 'typeorm';
+import type { DataSource, EntityManager, Repository } from 'typeorm';
 import type { TransactionEventsService } from '../events/transaction-events.service';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { CaseStatus, RefundStatus } from '../mobile-money/enums/mobile-money.enum';
 import type { Transaction } from '../transactions/entities/transaction.entity';
 import { RefundResponseDto } from './dto/refund-response.dto';
-import type { Refund } from './entities/refund.entity';
+import { Refund } from './entities/refund.entity';
 import { ProviderRefundRejectedException, type ProviderRefundPort } from './provider-refund.port';
 import { RefundsService } from './refunds.service';
 
@@ -15,6 +15,7 @@ describe('RefundsService', () => {
   let transactions: jest.Mocked<Repository<Transaction>>;
   let events: jest.Mocked<TransactionEventsService>;
   let provider: jest.Mocked<ProviderRefundPort>;
+  let dataSource: jest.Mocked<DataSource>;
   let service: RefundsService;
 
   beforeEach(() => {
@@ -80,7 +81,15 @@ describe('RefundsService', () => {
       })),
     };
 
-    service = new RefundsService(refunds, transactions, events, provider);
+    dataSource = {
+      transaction: jest.fn(async (work: (manager: EntityManager) => Promise<unknown>) =>
+        work({
+          getRepository: (entity: unknown) => (entity === Refund ? refunds : transactions),
+        } as unknown as EntityManager),
+      ),
+    } as unknown as jest.Mocked<DataSource>;
+
+    service = new RefundsService(refunds, transactions, events, provider, dataSource);
   });
 
   it('rembourse le montant effectivement encaisse et reste idempotent', async () => {
@@ -126,6 +135,44 @@ describe('RefundsService', () => {
     expect(retrySummary).toEqual({ examined: 0, completed: 0 });
     expect(manualReplay).toBe(failed);
     expect(provider.refund).toHaveBeenCalledTimes(1);
+  });
+
+  it('rouvre explicitement un refus metier avant de le rejouer', async () => {
+    provider.refund.mockRejectedValueOnce(
+      new ProviderRefundRejectedException('Solde marchand insuffisant'),
+    );
+
+    const failed = await service.requestRefund(transaction.reference, 'ops');
+    expect(failed.retryable).toBe(false);
+
+    const reopened = await service.reopenRefund(transaction.reference, 'superviseur');
+    expect(reopened.retryable).toBe(true);
+    expect(reopened.lastError).toBeNull();
+
+    const completed = await service.requestRefund(transaction.reference, 'ops');
+
+    expect(events.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: TransactionEventType.REFUND_REOPENED,
+        detail: expect.stringContaining('superviseur'),
+      }),
+      expect.anything(),
+    );
+    expect(completed.status).toBe(RefundStatus.COMPLETED);
+    expect(provider.refund).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuse de rouvrir un dossier deja rejouable', async () => {
+    storedRefund = refunds.create({
+      transactionReference: transaction.reference,
+      status: RefundStatus.FAILED,
+      retryable: true,
+    });
+
+    await expect(service.reopenRefund(transaction.reference, 'ops')).rejects.toMatchObject({
+      response: expect.objectContaining({ error: 'REFUND_ALREADY_RETRYABLE' }),
+    });
+    expect(events.record).not.toHaveBeenCalled();
   });
 
   it('ne publie jamais la cle d idempotence fournisseur', async () => {

@@ -195,6 +195,28 @@ describe('Remboursement (e2e)', () => {
       expect(row.case_status).toBe(CaseStatus.MANUAL_REVIEW);
     });
 
+    it('rouvre explicitement un refus metier et consigne le fait', async () => {
+      const { reference } = await withDebt(1250.75, 10.13);
+      await requestRefund(reference).expect(200);
+
+      const reopened = await request(app.getHttpServer())
+        .post(`/api/v1/transfers/${reference}/refund/reopen`)
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(200);
+
+      expect(reopened.body.status).toBe(RefundStatus.FAILED);
+      expect(reopened.body.lastError).toBeUndefined();
+      expect((await eventsOf(reference)).map((event) => event.eventType)).toContain(
+        'REFUND_REOPENED',
+      );
+
+      const duplicate = await request(app.getHttpServer())
+        .post(`/api/v1/transfers/${reference}/refund/reopen`)
+        .set('Authorization', E2E_AUTHORIZATION)
+        .expect(422);
+      expect(duplicate.body.error).toBe('REFUND_ALREADY_RETRYABLE');
+    });
+
     it('rejoue une indisponibilite sans jamais rembourser deux fois', async () => {
       // Le simulateur simule un timeout sur les montants se terminant par .99
       const { reference } = await withDebt(1250.75, 20.99);

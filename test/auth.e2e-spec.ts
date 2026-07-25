@@ -82,6 +82,7 @@ describe('Authentification (e2e)', () => {
       ['POST', '/api/v1/simulator/mobile-money/payments/AGG-AUTH-0001/confirm'],
       ['GET', '/api/v1/transfers/TRF-20260725-8F3A2C71/refund'],
       ['POST', '/api/v1/transfers/TRF-20260725-8F3A2C71/refund'],
+      ['POST', '/api/v1/transfers/TRF-20260725-8F3A2C71/refund/reopen'],
     ])('refuse %s %s sans cle', async (method, path) => {
       const response = await (method === 'POST'
         ? request(server()).post(path).send({})

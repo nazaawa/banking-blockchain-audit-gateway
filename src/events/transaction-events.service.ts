@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { QueryFailedError, Repository } from 'typeorm';
+import { EntityManager, QueryFailedError, Repository } from 'typeorm';
 import { AnchorStatus } from '../blockchain/enums/anchor-status.enum';
 import { computeFingerprint, generateSalt } from '../blockchain/fingerprint.util';
 import { getCorrelationId } from '../common/context/request-context';
@@ -70,11 +70,15 @@ export class TransactionEventsService {
    * @throws Error si le document produit ne respecte pas son XSD, ou si le rang
    *         ne peut pas etre obtenu apres plusieurs tentatives.
    */
-  async record(input: RecordEventInput): Promise<TransactionEvent> {
+  async record(input: RecordEventInput, manager?: EntityManager): Promise<TransactionEvent> {
     const { transaction } = input;
+    const repository = manager?.getRepository(TransactionEvent) ?? this.events;
 
     for (let attempt = 1; attempt <= MAX_SEQUENCE_ATTEMPTS; attempt += 1) {
-      const previous = await this.findLatest(transaction.reference);
+      const previous = await repository.findOne({
+        where: { transactionReference: transaction.reference },
+        order: { sequence: 'DESC' },
+      });
       const isClosing = input.type === TransactionEventType.CASE_CLOSED;
 
       const draft: SerializableEvent = {
@@ -108,7 +112,7 @@ export class TransactionEventsService {
       await this.xsdValidator.assertValid(xml, SCHEMAS.transactionEvent);
 
       const salt = generateSalt();
-      const event = this.events.create({
+      const event = repository.create({
         ...draft,
         fingerprint: computeFingerprint(salt, xml),
         fingerprintSalt: salt,
@@ -117,7 +121,7 @@ export class TransactionEventsService {
       });
 
       try {
-        const saved = await this.events.save(event);
+        const saved = await repository.save(event);
 
         this.logger.log({
           event: 'transaction-event.recorded',

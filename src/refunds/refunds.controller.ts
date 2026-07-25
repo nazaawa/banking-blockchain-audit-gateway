@@ -50,6 +50,36 @@ export class RefundsController {
     );
   }
 
+  @Post('reopen')
+  @RequireScopes(SCOPES.refundsWrite)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Rouvrir un dossier ferme par un refus fournisseur',
+    description: [
+      'Un refus metier — solde marchand insuffisant, plafond atteint — rend le',
+      'dossier non rejouable : le marteler produirait le meme echec.',
+      '',
+      'Une fois la cause levee hors systeme, ce point d entree le remet en jeu et',
+      'consigne un fait `REFUND_REOPENED` dans le registre. Sans lui, la',
+      'reouverture passerait par une ecriture directe en base, invisible de la',
+      'preuve.',
+    ].join('\n'),
+  })
+  @ApiOkResponse({ type: RefundResponseDto })
+  @ApiNotFoundResponse({ description: 'Aucun remboursement ouvert', type: ErrorResponseDto })
+  @ApiUnprocessableEntityResponse({
+    description: 'Dossier deja abouti ou deja rejouable',
+    type: ErrorResponseDto,
+  })
+  async reopen(
+    @Param() params: TransferParamsDto,
+    @Req() req: Request,
+  ): Promise<RefundResponseDto> {
+    return RefundResponseDto.fromEntity(
+      await this.refunds.reopenRefund(params.reference, req.apiKey?.keyId),
+    );
+  }
+
   @Get()
   @RequireScopes(SCOPES.transfersRead)
   @ApiOperation({ summary: 'Consulter le statut d un remboursement' })

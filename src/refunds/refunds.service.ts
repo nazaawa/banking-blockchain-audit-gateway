@@ -6,9 +6,9 @@ import {
   NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
+import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
-import { QueryFailedError, Repository } from 'typeorm';
+import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import { getCorrelationId } from '../common/context/request-context';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { TransactionEventsService } from '../events/transaction-events.service';
@@ -66,6 +66,8 @@ export class RefundsService {
     private readonly events: TransactionEventsService,
     @Inject(PROVIDER_REFUND_PORT)
     private readonly provider: ProviderRefundPort,
+    @InjectDataSource()
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -92,6 +94,74 @@ export class RefundsService {
     }
 
     return this.attempt(refund, transaction);
+  }
+
+  /**
+   * Rouvre un dossier ferme par un refus metier.
+   *
+   * Un refus n'est definitif que tant que sa cause subsiste chez le fournisseur.
+   * Une fois celle-ci levee — solde recharge, plafond releve — le dossier doit
+   * pouvoir repartir sans qu'un operateur ait a toucher la base : une ecriture
+   * directe echapperait au registre, et la reouverture ne serait pas prouvable.
+   */
+  async reopenRefund(transactionReference: string, reopenedBy?: string): Promise<Refund> {
+    return this.dataSource.transaction(async (manager) => {
+      const refunds = manager.getRepository(Refund);
+      const transactions = manager.getRepository(Transaction);
+      const refund = await refunds.findOne({
+        where: { transactionReference },
+        // Serialise deux decisions de reouverture concurrentes : la seconde
+        // relit `retryable=true` apres le commit de la premiere et est refusee.
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!refund) {
+        throw new NotFoundException({
+          error: 'REFUND_NOT_FOUND',
+          message: `Aucun remboursement ouvert pour la reference ${transactionReference}`,
+        });
+      }
+
+      if (refund.status === RefundStatus.COMPLETED) {
+        throw new UnprocessableEntityException({
+          error: 'REFUND_ALREADY_COMPLETED',
+          message: 'Ce remboursement a abouti : il n y a rien a rouvrir',
+        });
+      }
+      if (refund.retryable) {
+        throw new UnprocessableEntityException({
+          error: 'REFUND_ALREADY_RETRYABLE',
+          message: 'Ce dossier est deja rejouable : une simple nouvelle demande suffit',
+        });
+      }
+
+      const transaction = await transactions.findOneByOrFail({
+        reference: transactionReference,
+      });
+
+      refund.retryable = true;
+      refund.lastError = null;
+
+      await this.events.record(
+        {
+          type: TransactionEventType.REFUND_REOPENED,
+          transaction,
+          observedAmount: refund.amount,
+          observedCurrency: refund.currency,
+          detail: `Dossier rouvert${reopenedBy ? ` par ${reopenedBy}` : ''} apres levee du refus fournisseur`,
+        },
+        manager,
+      );
+      const reopened = await refunds.save(refund);
+
+      this.logger.log({
+        event: 'refund.reopened',
+        reference: transactionReference,
+        attempts: reopened.attempts,
+        reopenedBy,
+      });
+
+      return reopened;
+    });
   }
 
   async findByTransaction(transactionReference: string): Promise<Refund> {
