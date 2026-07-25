@@ -6,6 +6,7 @@ import type { Transaction } from '../transactions/entities/transaction.entity';
 import { RefundResponseDto } from './dto/refund-response.dto';
 import { Refund } from './entities/refund.entity';
 import { ProviderRefundRejectedException, type ProviderRefundPort } from './provider-refund.port';
+import { TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import { RefundsService } from './refunds.service';
 
 describe('RefundsService', () => {
@@ -89,7 +90,14 @@ describe('RefundsService', () => {
       ),
     } as unknown as jest.Mocked<DataSource>;
 
-    service = new RefundsService(refunds, transactions, events, provider, dataSource);
+    service = new RefundsService(
+      refunds,
+      transactions,
+      events,
+      new TransactionStateMachine(),
+      provider,
+      dataSource,
+    );
   });
 
   it('rembourse le montant effectivement encaisse et reste idempotent', async () => {
@@ -108,15 +116,20 @@ describe('RefundsService', () => {
     expect(replay).toBe(first);
     expect(transaction.refundStatus).toBe(RefundStatus.COMPLETED);
     expect(transaction.caseStatus).toBe(CaseStatus.RESOLVED);
+    // Le second argument est la transaction SQL de l'ecriture metier : c'est
+    // elle qui interdit qu'un remboursement aboutisse sans son fait consigne.
     expect(events.record).toHaveBeenCalledWith(
       expect.objectContaining({ type: TransactionEventType.REFUND_REQUESTED }),
+      expect.anything(),
     );
     expect(events.record).toHaveBeenCalledWith(
       expect.objectContaining({ type: TransactionEventType.REFUND_COMPLETED }),
+      expect.anything(),
     );
     expect(events.closeCase).toHaveBeenCalledWith(
       transaction,
       'Dossier clos apres remboursement du payeur',
+      expect.anything(),
     );
   });
 

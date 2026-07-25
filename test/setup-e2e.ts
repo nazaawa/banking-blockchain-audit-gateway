@@ -39,5 +39,5 @@ export const E2E_READ_ONLY_AUTHORIZATION = `Bearer lecture.${[
 
 process.env.AUTH_ENABLED = 'true';
 process.env.API_KEYS =
-  'e2e|1193b79696cb332993cbab421b8244fa4bbfd1cd4f9a8b28d339210e5fa46313|transfers:read,transfers:write,refunds:write,reconciliation:write,anchors:read,anchors:write,simulator:write|Tests d integration;' +
+  'e2e|1193b79696cb332993cbab421b8244fa4bbfd1cd4f9a8b28d339210e5fa46313|transfers:read,transfers:write,refunds:write,reconciliation:write,anchors:read,anchors:write,simulator:write,ledger:read,treasury:write|Tests d integration;' +
   'lecture|877fa5d4f0232aa3c748c33da682417c8428d41270a0b2df4c48e6921fc34085|transfers:read|Lecture seule';

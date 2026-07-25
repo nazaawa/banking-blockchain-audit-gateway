@@ -1,4 +1,4 @@
-import type { Repository } from 'typeorm';
+import type { DataSource, EntityManager, Repository } from 'typeorm';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
 import { ReferenceGenerator } from '../transactions/reference.generator';
@@ -13,6 +13,7 @@ import {
   ReconciliationStatus,
   RefundStatus,
 } from './enums/mobile-money.enum';
+import { TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import { MobileMoneyService } from './mobile-money.service';
 import { TransactionEventsService } from '../events/transaction-events.service';
 
@@ -74,12 +75,24 @@ describe('MobileMoneyService — garde-fou sur le montant confirme', () => {
       findLatest: jest.fn(async () => null),
     } as unknown as jest.Mocked<TransactionEventsService>;
 
+    // Les transitions s'executent desormais dans une transaction SQL englobante :
+    // le faux manager reexpose simplement le depot deja bouchonne.
+    const dataSource = {
+      transaction: async <T>(work: (manager: EntityManager) => Promise<T>): Promise<T> =>
+        work({
+          createQueryBuilder: () => builder,
+          getRepository: () => transactions,
+        } as unknown as EntityManager),
+    } as unknown as DataSource;
+
     service = new MobileMoneyService(
       {} as TransactionsRepository,
       transactions,
       {} as ReferenceGenerator,
       {} as AggregatorSimulatorService,
       eventLedger,
+      new TransactionStateMachine(),
+      dataSource,
       { allowedCurrencies: ['CDF'], maxAmount: 1_000_000 },
       { settlementIban: 'FR7630006000011234567890189' } as never,
     );

@@ -7,6 +7,8 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { Test, type TestingModule } from '@nestjs/testing';
+import { getDataSourceToken } from '@nestjs/typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { AuditDirection, AuditOutcome } from '../audit/enums/audit-direction.enum';
 import { businessConfig } from '../config/configuration';
@@ -22,6 +24,7 @@ import { Transaction } from './entities/transaction.entity';
 import { TransactionStatus } from './enums/transaction-status.enum';
 import { ReferenceGenerator } from './reference.generator';
 import { TransactionsRepository } from './transactions.repository';
+import { TransactionStateMachine } from './state/transaction-state.machine';
 import { TransactionsService } from './transactions.service';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
@@ -93,6 +96,14 @@ describe('TransactionsService', () => {
       closeCase: jest.fn(async () => null),
     } as unknown as jest.Mocked<TransactionEventsService>;
 
+    // Ecriture metier et consignation du fait partagent une transaction SQL.
+    // Le faux manager execute le travail sans differer : ce que les tests
+    // eprouvent ici, c'est que les deux sont bien demandes ensemble.
+    const dataSource = {
+      transaction: async <T>(work: (manager: EntityManager) => Promise<T>): Promise<T> =>
+        work({} as EntityManager),
+    } as unknown as DataSource;
+
     const moduleRef: TestingModule = await Test.createTestingModule({
       providers: [
         TransactionsService,
@@ -105,6 +116,8 @@ describe('TransactionsService', () => {
         { provide: SoapClientService, useValue: soapClient },
         { provide: AuditService, useValue: auditService },
         { provide: TransactionEventsService, useValue: eventLedger },
+        TransactionStateMachine,
+        { provide: getDataSourceToken(), useValue: dataSource },
         {
           provide: businessConfig.KEY,
           useValue: { allowedCurrencies: ['EUR', 'USD'], maxAmount: 999_999_999.99 },

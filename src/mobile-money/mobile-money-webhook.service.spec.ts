@@ -1,4 +1,4 @@
-import type { Repository, UpdateResult } from 'typeorm';
+import type { DataSource, EntityManager, Repository, UpdateResult } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { SoapClientService } from '../soap/soap-client.service';
 import type { AmountInWordsResult } from '../soap/soap.types';
@@ -13,6 +13,7 @@ import {
   ReconciliationStatus,
 } from './enums/mobile-money.enum';
 import { MobileMoneyService } from './mobile-money.service';
+import { TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import { MobileMoneyWebhookService } from './mobile-money-webhook.service';
 import { ReconciliationService } from './reconciliation.service';
 import { TransactionEventsService } from '../events/transaction-events.service';
@@ -103,6 +104,13 @@ describe('MobileMoneyWebhookService', () => {
       findLatest: jest.fn(async () => null),
     } as unknown as jest.Mocked<TransactionEventsService>;
 
+    // L'issue de la jambe bancaire et sa consignation partagent une transaction
+    // SQL : le faux manager reexpose simplement le depot deja bouchonne.
+    const dataSource = {
+      transaction: async <T>(work: (manager: EntityManager) => Promise<T>): Promise<T> =>
+        work({ getRepository: () => transactions } as unknown as EntityManager),
+    } as unknown as DataSource;
+
     service = new MobileMoneyWebhookService(
       events,
       transactions,
@@ -111,6 +119,8 @@ describe('MobileMoneyWebhookService', () => {
       audit,
       reconciliation,
       eventLedger,
+      new TransactionStateMachine(),
+      dataSource,
       { webhookSecret: 'test-secret' } as never,
     );
   });

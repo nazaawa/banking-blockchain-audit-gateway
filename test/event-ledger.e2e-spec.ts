@@ -12,6 +12,7 @@ import type { AnchorReceipt, OnChainBatch } from '../src/blockchain/evm-anchor.c
 import { verifyProof } from '../src/blockchain/merkle.util';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { SoapClientService } from '../src/soap/soap-client.service';
+import { TransactionEventsService } from '../src/events/transaction-events.service';
 import type { AmountInWordsResult } from '../src/soap/soap.types';
 
 interface EventBody {
@@ -43,19 +44,32 @@ interface VerificationBody {
   }>;
 }
 
+/**
+ * Tables append-only et declencheur qui les protege.
+ *
+ * Le journal comptable est protege au meme titre que le registre : simuler un
+ * attaquant suppose donc de lever les deux, sinon les scenarios de falsification
+ * n'eprouveraient plus que la premiere barriere.
+ */
+const APPEND_ONLY_GUARDS: ReadonlyArray<[table: string, trigger: string]> = [
+  ['transaction_events', 'trg_transaction_events_append_only'],
+  ['journal_entries', 'trg_journal_entries_append_only'],
+  ['journal_lines', 'trg_journal_lines_append_only'],
+];
+
 const withoutAppendOnlyGuard = async (
   dataSource: DataSource,
   mutation: () => Promise<unknown>,
 ): Promise<void> => {
-  await dataSource.query(
-    'ALTER TABLE transaction_events DISABLE TRIGGER trg_transaction_events_append_only',
-  );
+  for (const [table, trigger] of APPEND_ONLY_GUARDS) {
+    await dataSource.query(`ALTER TABLE ${table} DISABLE TRIGGER ${trigger}`);
+  }
   try {
     await mutation();
   } finally {
-    await dataSource.query(
-      'ALTER TABLE transaction_events ENABLE TRIGGER trg_transaction_events_append_only',
-    );
+    for (const [table, trigger] of APPEND_ONLY_GUARDS) {
+      await dataSource.query(`ALTER TABLE ${table} ENABLE TRIGGER ${trigger}`);
+    }
   }
 };
 
@@ -154,8 +168,8 @@ describe('Registre d evenements (e2e)', () => {
     // TRUNCATE ne declenche pas les declencheurs de ligne : le nettoyage de test
     // reste possible, la protection append-only vise les DELETE applicatifs.
     await dataSource.query(
-      'TRUNCATE TABLE transaction_events, audit_logs, transactions, anchor_batches, ' +
-        'mobile_money_webhook_events RESTART IDENTITY CASCADE',
+      'TRUNCATE TABLE journal_lines, journal_entries, transaction_events, audit_logs, ' +
+        'transactions, anchor_batches, mobile_money_webhook_events RESTART IDENTITY CASCADE',
     );
   });
 
@@ -413,12 +427,29 @@ describe('Registre d evenements (e2e)', () => {
       const { reference, aggregator } = await initiate();
       await confirm(aggregator, 1250.75);
 
-      await withoutAppendOnlyGuard(dataSource, () =>
-        dataSource.query(
+      // Le journal comptable reference les faits monetaires : sa cle etrangere
+      // interdit desormais de supprimer un fait sans supprimer d'abord son
+      // ecriture. On simule donc un attaquant qui va jusqu'au bout, sans quoi le
+      // test ne prouverait plus la detection mais seulement cet obstacle.
+      await withoutAppendOnlyGuard(dataSource, async () => {
+        await dataSource.query(
+          `DELETE FROM journal_lines WHERE entry_id IN (
+             SELECT entry.id FROM journal_entries entry
+             JOIN transaction_events event ON event.id = entry.event_id
+             WHERE event.transaction_reference = $1 AND event.sequence = 2)`,
+          [reference],
+        );
+        await dataSource.query(
+          `DELETE FROM journal_entries WHERE event_id IN (
+             SELECT id FROM transaction_events
+             WHERE transaction_reference = $1 AND sequence = 2)`,
+          [reference],
+        );
+        await dataSource.query(
           'DELETE FROM transaction_events WHERE transaction_reference = $1 AND sequence = 2',
           [reference],
-        ),
-      );
+        );
+      });
 
       const report = await verifyChain(reference);
 
@@ -457,6 +488,86 @@ describe('Registre d evenements (e2e)', () => {
       const report = await verifyChain(reference);
 
       expect(report.head).toBe(events[events.length - 1].fingerprint);
+    });
+  });
+
+  // ==========================================================================
+
+  /**
+   * Atomicite de l'ecriture metier et de sa consignation.
+   *
+   * Sans elle, un incident survenu entre les deux laisserait une ligne dans un
+   * etat que rien ne justifie. La verification ne peut pas distinguer ce cas
+   * d'une suppression malveillante : elle conclurait a une alteration.
+   *
+   * Faire echouer la consignation est le seul moyen d'eprouver la propriete —
+   * un test qui se contente de constater que les deux ecritures ont eu lieu ne
+   * dit rien de ce qui se passe quand l'une echoue.
+   */
+  describe('Atomicite de l ecriture', () => {
+    const countTransactions = async (): Promise<number> => {
+      const [row] = await dataSource.query<Array<{ count: string }>>(
+        'SELECT COUNT(*)::text AS count FROM transactions',
+      );
+      return Number(row.count);
+    };
+
+    it('annule l enregistrement du paiement si son fait ne peut pas etre consigne', async () => {
+      const ledger = app.get(TransactionEventsService);
+      const record = jest
+        .spyOn(ledger, 'record')
+        .mockRejectedValueOnce(new Error('registre indisponible'));
+
+      await request(app.getHttpServer())
+        .post('/api/v1/mobile-money/transactions')
+        .set('Authorization', E2E_AUTHORIZATION)
+        .send({
+          operator: 'MPESA',
+          payerMsisdn: '+243812345678',
+          creditorIban: 'DE89370400440532013000',
+          creditorName: 'Fournisseur Kinshasa',
+          amount: 1250.75,
+          currency: 'EUR',
+        })
+        .expect(500);
+
+      expect(record).toHaveBeenCalledTimes(1);
+      // La ligne ne doit pas survivre a l'echec de sa propre consignation.
+      expect(await countTransactions()).toBe(0);
+
+      record.mockRestore();
+    });
+
+    it('annule la confirmation fournisseur si son fait ne peut pas etre consigne', async () => {
+      const { reference, aggregator } = await initiate();
+
+      const ledger = app.get(TransactionEventsService);
+      const record = jest
+        .spyOn(ledger, 'record')
+        .mockRejectedValueOnce(new Error('registre indisponible'));
+
+      await request(app.getHttpServer())
+        .post(`/api/v1/simulator/mobile-money/payments/${aggregator}/confirm`)
+        .set('Authorization', E2E_AUTHORIZATION)
+        .send({ amount: 1250.75 })
+        .expect(500);
+
+      record.mockRestore();
+
+      // La prise de la jambe bancaire est annulee avec elle : sans cela, la
+      // transaction serait reputee en cours de traitement bancaire alors
+      // qu'aucun fait ne l'atteste, et le rejeu serait interdit a jamais.
+      const [row] = await dataSource.query<Array<{ bank_status: string; provider_status: string }>>(
+        'SELECT bank_status, provider_status FROM transactions WHERE reference = $1',
+        [reference],
+      );
+      expect(row.bank_status).toBe('NOT_STARTED');
+
+      // Le webhook rejoue ensuite normalement : rien n'est reste bloque.
+      await confirm(aggregator, 1250.75);
+      expect((await chainOf(reference)).map((event) => event.eventType)).toContain(
+        'PROVIDER_CONFIRMED',
+      );
     });
   });
 });

@@ -1,6 +1,6 @@
 import { Test } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
-import type { Repository } from 'typeorm';
+import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
+import type { DataSource, EntityManager, Repository } from 'typeorm';
 import { Transaction } from '../transactions/entities/transaction.entity';
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
 import {
@@ -9,6 +9,7 @@ import {
   PaymentChannel,
   ReconciliationStatus,
 } from './enums/mobile-money.enum';
+import { TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import { ReconciliationService } from './reconciliation.service';
 import { TransactionEventsService } from '../events/transaction-events.service';
 
@@ -42,11 +43,20 @@ describe('ReconciliationService', () => {
       closeCase: jest.fn(async () => null),
     } as unknown as jest.Mocked<TransactionEventsService>;
 
+    // Verdict et fait consigne partagent desormais une transaction SQL : le faux
+    // manager execute le travail immediatement en reexposant le depot bouchonne.
+    const dataSource = {
+      transaction: async <T>(work: (manager: EntityManager) => Promise<T>): Promise<T> =>
+        work({ getRepository: () => repository } as unknown as EntityManager),
+    } as unknown as DataSource;
+
     const moduleRef = await Test.createTestingModule({
       providers: [
         ReconciliationService,
         { provide: getRepositoryToken(Transaction), useValue: repository },
         { provide: TransactionEventsService, useValue: eventLedger },
+        TransactionStateMachine,
+        { provide: getDataSourceToken(), useValue: dataSource },
       ],
     }).compile();
     service = moduleRef.get(ReconciliationService);
@@ -58,9 +68,12 @@ describe('ReconciliationService', () => {
     expect(result.reconciliationStatus).toBe(ReconciliationStatus.MATCHED);
     expect(result.reconciledAt).toBeInstanceOf(Date);
     expect(eventLedger.closeCase).toHaveBeenCalledTimes(1);
+    // Le troisieme argument est la transaction SQL portant l'ecriture du verdict :
+    // sa presence est ce qui garantit qu'un verdict ne peut pas survivre seul.
     expect(eventLedger.closeCase).toHaveBeenCalledWith(
       result,
       'Dossier clos apres rapprochement conforme',
+      expect.anything(),
     );
   });
 
