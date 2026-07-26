@@ -5,6 +5,7 @@ import { Transaction } from '../transactions/entities/transaction.entity';
 import { Refund } from './entities/refund.entity';
 import { PROVIDER_REFUND_PORT } from './provider-refund.port';
 import { RefundsController } from './refunds.controller';
+import { RefundRetryWorker } from './refund-retry.worker';
 import { RefundsService } from './refunds.service';
 import { SimulatorRefundAdapter } from './simulator-refund.adapter';
 
@@ -19,6 +20,7 @@ import { SimulatorRefundAdapter } from './simulator-refund.adapter';
   controllers: [RefundsController],
   providers: [
     RefundsService,
+    RefundRetryWorker,
     SimulatorRefundAdapter,
     { provide: PROVIDER_REFUND_PORT, useExisting: SimulatorRefundAdapter },
   ],

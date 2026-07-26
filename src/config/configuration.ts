@@ -106,6 +106,9 @@ export const mobileMoneyConfig = registerAs('mobileMoney', () => ({
   bankWorkerIntervalMs: toInt(process.env.MOBILE_MONEY_BANK_WORKER_INTERVAL_MS, 2000),
   /** Tentatives avant abandon et ouverture d'une dette. */
   bankWorkerMaxAttempts: toInt(process.env.MOBILE_MONEY_BANK_WORKER_MAX_ATTEMPTS, 4),
+  /** Reprise periodique des remboursements dont l'issue fournisseur reste indeterminee. */
+  refundWorkerEnabled: toBool(process.env.MOBILE_MONEY_REFUND_WORKER_ENABLED, true),
+  refundWorkerIntervalMs: toInt(process.env.MOBILE_MONEY_REFUND_WORKER_INTERVAL_MS, 30_000),
   /** Secret partage utilise pour authentifier les callbacks HMAC SHA-256. */
   webhookSecret: process.env.MOBILE_MONEY_WEBHOOK_SECRET ?? 'local-demo-webhook-secret',
   simulatorEnabled: toBool(

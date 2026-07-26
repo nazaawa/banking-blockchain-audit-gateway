@@ -60,6 +60,8 @@ const RULES: Rule[] = [
   { key: 'MOBILE_MONEY_BANK_WORKER_ENABLED', kind: 'boolean' },
   { key: 'MOBILE_MONEY_BANK_WORKER_INTERVAL_MS', kind: 'int', min: 100 },
   { key: 'MOBILE_MONEY_BANK_WORKER_MAX_ATTEMPTS', kind: 'int', min: 1 },
+  { key: 'MOBILE_MONEY_REFUND_WORKER_ENABLED', kind: 'boolean' },
+  { key: 'MOBILE_MONEY_REFUND_WORKER_INTERVAL_MS', kind: 'int', min: 100 },
   { key: 'AUDIT_MAX_PAYLOAD_CHARS', kind: 'int', min: 0 },
   { key: 'AUDIT_PERSIST_PAYLOADS', kind: 'boolean' },
   { key: 'SWAGGER_ENABLED', kind: 'boolean' },
