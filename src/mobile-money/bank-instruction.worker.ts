@@ -7,8 +7,15 @@ import { mobileMoneyConfig } from '../config/configuration';
 import { TransactionEventType } from '../events/enums/transaction-event.enum';
 import { TransactionEventsService } from '../events/transaction-events.service';
 import { Transaction } from '../transactions/entities/transaction.entity';
+import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
+import { stateOf, TransactionStateMachine } from '../transactions/state/transaction-state.machine';
 import { BankInstruction, BankInstructionStatus } from './entities/bank-instruction.entity';
-import { BankProcessingStatus, CaseStatus, RefundStatus } from './enums/mobile-money.enum';
+import {
+  BankProcessingStatus,
+  CaseStatus,
+  ReconciliationStatus,
+  RefundStatus,
+} from './enums/mobile-money.enum';
 
 const WORKER_JOB = 'bank-instruction-worker';
 
@@ -59,6 +66,7 @@ export class BankInstructionWorker implements OnModuleInit {
     @InjectRepository(BankInstruction)
     private readonly instructions: Repository<BankInstruction>,
     private readonly events: TransactionEventsService,
+    private readonly stateMachine: TransactionStateMachine,
     private readonly scheduler: SchedulerRegistry,
     @InjectDataSource()
     private readonly dataSource: DataSource,
@@ -287,6 +295,8 @@ export class BankInstructionWorker implements OnModuleInit {
     transaction: Transaction,
     reason: string,
   ): Promise<void> {
+    const before = stateOf(transaction);
+
     await this.dataSource.transaction(async (manager) => {
       instruction.status = BankInstructionStatus.DEAD_LETTER;
       instruction.lastError = reason.slice(0, 1024);
@@ -295,14 +305,30 @@ export class BankInstructionWorker implements OnModuleInit {
 
       const updated = await manager.getRepository(Transaction).save(
         Object.assign(transaction, {
+          status: TransactionStatus.FAILED,
+          bankStatus: BankProcessingStatus.FAILED,
+          reconciliationStatus: ReconciliationStatus.MANUAL_REVIEW,
+          reconciliationReason:
+            'Confirmation Mobile Money recue mais traitement bancaire abandonne apres reprises',
           refundStatus: RefundStatus.REQUIRED,
           caseStatus: CaseStatus.MANUAL_REVIEW,
+          failureReason: reason.slice(0, 1024),
+          processedAt: new Date(),
           caseReason:
             `Instruction bancaire abandonnee apres ${instruction.attempts} tentatives : ` +
             'encaissement confirme sans contrepartie, remboursement du payeur a instruire',
         }),
       );
+      this.stateMachine.assertTransition(before, stateOf(updated), updated.reference);
 
+      await this.events.record(
+        {
+          type: TransactionEventType.BANK_PROCESSING_FAILED,
+          transaction: updated,
+          detail: updated.failureReason,
+        },
+        manager,
+      );
       await this.events.record(
         {
           type: TransactionEventType.CASE_OPENED,

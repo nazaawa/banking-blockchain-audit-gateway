@@ -122,12 +122,26 @@ describe('File des instructions bancaires (e2e)', () => {
 
   const transactionOf = async (
     reference: string,
-  ): Promise<{ bank_status: string; refund_status: string; case_status: string }> => {
+  ): Promise<{
+    status: string;
+    bank_status: string;
+    reconciliation_status: string;
+    refund_status: string;
+    case_status: string;
+  }> => {
     const [row] = await dataSource.query<
-      Array<{ bank_status: string; refund_status: string; case_status: string }>
-    >('SELECT bank_status, refund_status, case_status FROM transactions WHERE reference = $1', [
-      reference,
-    ]);
+      Array<{
+        status: string;
+        bank_status: string;
+        reconciliation_status: string;
+        refund_status: string;
+        case_status: string;
+      }>
+    >(
+      'SELECT status, bank_status, reconciliation_status, refund_status, case_status ' +
+        'FROM transactions WHERE reference = $1',
+      [reference],
+    );
     return row;
   };
 
@@ -286,6 +300,9 @@ describe('File des instructions bancaires (e2e)', () => {
       // rien recu. Un echec definitif doit produire une **obligation**, pas
       // seulement une ligne de journal que personne ne relit.
       expect(await transactionOf(reference)).toMatchObject({
+        status: 'FAILED',
+        bank_status: 'FAILED',
+        reconciliation_status: 'MANUAL_REVIEW',
         refund_status: 'REQUIRED',
         case_status: 'MANUAL_REVIEW',
       });
@@ -295,7 +312,28 @@ describe('File des instructions bancaires (e2e)', () => {
         'SELECT event_type FROM transaction_events WHERE transaction_reference = $1',
         [reference],
       );
+      expect(events.map((event) => event.event_type)).toContain('BANK_PROCESSING_FAILED');
       expect(events.map((event) => event.event_type)).toContain('CASE_OPENED');
+
+      // L'obligation est aussi comptable : elle doit alimenter les soldes et les
+      // metriques, pas seulement exister dans une colonne mutable.
+      const entries = await dataSource.query<Array<{ event_type: string }>>(
+        'SELECT event_type FROM journal_entries WHERE transaction_reference = $1',
+        [reference],
+      );
+      expect(entries.map((entry) => entry.event_type)).toContain('BANK_PROCESSING_FAILED');
+
+      const [debt] = await dataSource.query<Array<{ balance: string }>>(
+        `SELECT COALESCE(
+           SUM(CASE WHEN line.direction = 'CREDIT' THEN line.amount ELSE -line.amount END),
+           0
+         )::text AS balance
+         FROM journal_lines line
+         JOIN journal_entries entry ON entry.id = line.entry_id
+         WHERE entry.transaction_reference = $1 AND line.account = 'PAYER_PAYABLE'`,
+        [reference],
+      );
+      expect(Number(debt.balance)).toBe(1250.75);
     });
 
     it('n execute plus une instruction abandonnee', async () => {
