@@ -42,6 +42,17 @@ interface VerificationBody {
     eventType: string;
     anchorVerified: boolean | null;
     fingerprintMatches: boolean;
+    onChainProof: {
+      chainId: string | null;
+      contractAddress: string | null;
+      txHash: string | null;
+      blockNumber: string | null;
+      batchId: string;
+      merkleRoot: string;
+      leaf: string;
+      proof: string[];
+      explorerUrl: string | null;
+    } | null;
   }>;
 }
 
@@ -348,7 +359,18 @@ describe('Registre d evenements (e2e)', () => {
       expect(report.events.at(-1)).toMatchObject({
         eventType: 'CASE_CLOSED',
         anchorVerified: true,
+        onChainProof: {
+          chainId: '31337',
+          contractAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+          txHash: `0x${'cd'.repeat(32)}`,
+          blockNumber: expect.any(String),
+          explorerUrl: `https://explorer.test/tx/0x${'cd'.repeat(32)}`,
+        },
       });
+
+      const proof = report.events.at(-1)?.onChainProof;
+      expect(proof).not.toBeNull();
+      expect(verifyProof(proof!.leaf, proof!.proof, proof!.merkleRoot)).toBe(true);
     });
 
     it('n ancre pas un dossier litigieux avant son remboursement', async () => {

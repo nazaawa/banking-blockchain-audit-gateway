@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
+import { blockchainConfig } from '../config/configuration';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AnchorBatch } from '../blockchain/entities/anchor-batch.entity';
@@ -20,6 +22,30 @@ import {
 import { TransactionStatus } from '../transactions/enums/transaction-status.enum';
 
 /** Verdict porte sur un maillon de la chaine. */
+/**
+ * Coordonnees permettant a un tiers de refaire la verification **sans nous**.
+ *
+ * Sans elles, un rapport qui affirme `anchorVerified: true` demande qu'on le
+ * croie sur parole — ce qui vide de son sens l'idee meme d'un registre d'audit
+ * inviolable. Publiees, elles permettent d'interroger le contrat directement :
+ * la feuille, sa preuve d'inclusion, et l'adresse ou poser la question.
+ */
+export interface OnChainProof {
+  chainId: string | null;
+  contractAddress: string | null;
+  /** Transaction ayant publie la racine du lot. */
+  txHash: string | null;
+  blockNumber: string | null;
+  batchId: string;
+  merkleRoot: string;
+  /** Feuille derivee de l'empreinte du fait : `keccak256(empreinte)`. */
+  leaf: string;
+  /** Chemin de hashs freres menant a la racine. */
+  proof: string[];
+  /** Lien vers l'explorateur, quand le reseau en declare un. */
+  explorerUrl: string | null;
+}
+
 export interface EventVerification {
   sequence: number;
   eventType: string;
@@ -32,6 +58,11 @@ export interface EventVerification {
   chainIntact: boolean;
   /** La preuve d'inclusion mene a la racine publiee sur la chaine. */
   anchorVerified: boolean | null;
+  /**
+   * De quoi refaire le controle soi-meme. `null` tant que le fait n'est pas
+   * publie : il n'y a alors rien a verifier ailleurs qu'ici.
+   */
+  onChainProof: OnChainProof | null;
   findings: string[];
 }
 
@@ -84,6 +115,8 @@ export class EventChainVerificationService {
     private readonly eventsService: TransactionEventsService,
     private readonly xsdValidator: XsdValidatorService,
     private readonly client: EvmAnchorClient,
+    @Inject(blockchainConfig.KEY)
+    private readonly chain: ConfigType<typeof blockchainConfig>,
   ) {}
 
   async verify(transactionReference: string): Promise<EventChainReport> {
@@ -342,6 +375,7 @@ export class EventChainVerificationService {
 
     // --- Publication ---------------------------------------------------------
     const anchorVerified = await this.verifyAnchor(event, findings);
+    const onChainProof = await this.buildProof(event);
 
     return {
       sequence: event.sequence,
@@ -351,7 +385,40 @@ export class EventChainVerificationService {
       fingerprintMatches,
       chainIntact,
       anchorVerified,
+      onChainProof,
       findings,
+    };
+  }
+
+  /**
+   * Coordonnees de la preuve publiee, pour qui veut la refaire sans nous.
+   *
+   * Elles ne sont **pas** relues depuis la chaine : ce sont les elements que
+   * nous affirmons avoir publies. C'est precisement leur interet — un tiers les
+   * confronte lui-meme au contrat, et notre affirmation devient verifiable au
+   * lieu d'etre a croire.
+   */
+  private async buildProof(event: TransactionEvent): Promise<OnChainProof | null> {
+    if (event.anchorStatus !== AnchorStatus.ANCHORED || !event.batchId || !event.merkleProof) {
+      return null;
+    }
+
+    const batch = await this.batches.findOne({ where: { id: event.batchId } });
+    if (!batch) return null;
+
+    return {
+      chainId: batch.chainId === null ? null : String(batch.chainId),
+      contractAddress: batch.contractAddress,
+      txHash: batch.txHash,
+      blockNumber: batch.blockNumber === null ? null : String(batch.blockNumber),
+      batchId: batch.id,
+      merkleRoot: batch.merkleRoot,
+      leaf: toLeaf(event.fingerprint),
+      proof: [...event.merkleProof],
+      explorerUrl:
+        this.chain.explorerTxUrl && batch.txHash
+          ? `${this.chain.explorerTxUrl}${batch.txHash}`
+          : null,
     };
   }
 

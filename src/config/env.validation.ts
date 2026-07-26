@@ -81,6 +81,7 @@ const RULES: Rule[] = [
 
   { key: 'BLOCKCHAIN_ENABLED', kind: 'boolean' },
   { key: 'BLOCKCHAIN_RPC_URL', kind: 'url' },
+  { key: 'BLOCKCHAIN_EXPLORER_TX_URL', kind: 'url' },
   { key: 'BLOCKCHAIN_CHAIN_ID', kind: 'int', min: 1 },
   {
     key: 'BLOCKCHAIN_CONTRACT_ADDRESS',

@@ -146,6 +146,14 @@ export const blockchainConfig = registerAs('blockchain', () => ({
   rpcUrl: process.env.BLOCKCHAIN_RPC_URL ?? 'http://127.0.0.1:8545',
   chainId: toInt(process.env.BLOCKCHAIN_CHAIN_ID, 31337),
   contractAddress: process.env.BLOCKCHAIN_CONTRACT_ADDRESS ?? '',
+  /**
+   * Prefixe d'URL d'un explorateur de blocs, transaction comprise.
+   *
+   * Exemple : `https://sepolia.etherscan.io/tx/`. Renseigne, il fait figurer
+   * dans chaque rapport de verification un lien ou un tiers constate la
+   * publication par lui-meme, sans nous interroger.
+   */
+  explorerTxUrl: process.env.BLOCKCHAIN_EXPLORER_TX_URL ?? '',
   privateKey: process.env.BLOCKCHAIN_PRIVATE_KEY ?? LOCAL_DEV_PRIVATE_KEY,
   /** Confirmations attendues avant de considerer l'ancrage acquis. */
   confirmations: toInt(process.env.BLOCKCHAIN_CONFIRMATIONS, 1),
