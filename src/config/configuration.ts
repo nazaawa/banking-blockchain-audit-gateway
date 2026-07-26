@@ -95,6 +95,17 @@ export const mobileMoneyConfig = registerAs('mobileMoney', () => ({
    * retroactivement des ecritures comptables deja passees.
    */
   feeRate: toFloat(process.env.MOBILE_MONEY_FEE_RATE, 0.015),
+  /**
+   * Travailleur drainant les instructions bancaires.
+   *
+   * Desactivable pour que les tests pilotent le drainage explicitement : un
+   * ordonnanceur qui tourne en arriere-plan rendrait leurs assertions
+   * dependantes du moment ou il passe.
+   */
+  bankWorkerEnabled: toBool(process.env.MOBILE_MONEY_BANK_WORKER_ENABLED, true),
+  bankWorkerIntervalMs: toInt(process.env.MOBILE_MONEY_BANK_WORKER_INTERVAL_MS, 2000),
+  /** Tentatives avant abandon et ouverture d'une dette. */
+  bankWorkerMaxAttempts: toInt(process.env.MOBILE_MONEY_BANK_WORKER_MAX_ATTEMPTS, 4),
   /** Secret partage utilise pour authentifier les callbacks HMAC SHA-256. */
   webhookSecret: process.env.MOBILE_MONEY_WEBHOOK_SECRET ?? 'local-demo-webhook-secret',
   simulatorEnabled: toBool(

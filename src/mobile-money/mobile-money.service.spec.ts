@@ -108,6 +108,23 @@ describe('MobileMoneyService — garde-fou sur le montant confirme', () => {
     });
   });
 
+  it('met l instruction en file dans la transaction qui confirme le paiement', async () => {
+    const enqueue = jest.fn(async () => undefined);
+
+    await service.confirmAndClaimBankProcessing(ordered(), webhook(), enqueue);
+
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ reference: ordered().reference }),
+      {
+        createQueryBuilder: expect.any(Function),
+        getRepository: expect.any(Function),
+      },
+    );
+    expect(eventLedger.record.mock.invocationCallOrder[0]).toBeLessThan(
+      enqueue.mock.invocationCallOrder[0],
+    );
+  });
+
   it.each([
     ['paiement partiel', { amount: 1.0 }, ReconciliationStatus.AMOUNT_MISMATCH],
     ['montant superieur', { amount: 99999.99 }, ReconciliationStatus.AMOUNT_MISMATCH],

@@ -15,6 +15,7 @@ import {
 import { MobileMoneyService } from './mobile-money.service';
 import type { MetricsService } from '../observability/metrics.service';
 import { TransactionStateMachine } from '../transactions/state/transaction-state.machine';
+import { BankInstructionWorker } from './bank-instruction.worker';
 import { MobileMoneyWebhookService } from './mobile-money-webhook.service';
 import { ReconciliationService } from './reconciliation.service';
 import { TransactionEventsService } from '../events/transaction-events.service';
@@ -64,6 +65,7 @@ describe('MobileMoneyWebhookService', () => {
   let audit: jest.Mocked<AuditService>;
   let reconciliation: jest.Mocked<ReconciliationService>;
   let eventLedger: jest.Mocked<TransactionEventsService>;
+  let worker: jest.Mocked<BankInstructionWorker>;
 
   beforeEach(() => {
     events = {
@@ -79,10 +81,16 @@ describe('MobileMoneyWebhookService', () => {
     } as unknown as jest.Mocked<Repository<Transaction>>;
     mobileMoney = {
       findByAggregatorReference: jest.fn(async () => transaction()),
-      confirmAndClaimBankProcessing: jest.fn(async (value: Transaction) => ({
-        transaction: value,
-        claimed: true,
-      })),
+      confirmAndClaimBankProcessing: jest.fn(
+        async (
+          value: Transaction,
+          _payload: MobileMoneyWebhookDto,
+          onClaimed?: (claimed: Transaction, manager: EntityManager) => Promise<void>,
+        ) => {
+          await onClaimed?.(value, {} as EntityManager);
+          return { transaction: value, claimed: true };
+        },
+      ),
       markProviderFailed: jest.fn(),
     } as unknown as jest.Mocked<MobileMoneyService>;
     soap = {
@@ -105,6 +113,10 @@ describe('MobileMoneyWebhookService', () => {
       findLatest: jest.fn(async () => null),
     } as unknown as jest.Mocked<TransactionEventsService>;
 
+    worker = {
+      enqueue: jest.fn(async () => ({}) as never),
+    } as unknown as jest.Mocked<BankInstructionWorker>;
+
     // L'issue de la jambe bancaire et sa consignation partagent une transaction
     // SQL : le faux manager reexpose simplement le depot deja bouchonne.
     const dataSource = {
@@ -121,6 +133,9 @@ describe('MobileMoneyWebhookService', () => {
       reconciliation,
       eventLedger,
       new TransactionStateMachine(),
+      // La mise en file est observee separement : ici seule l'orchestration du
+      // callback est eprouvee.
+      worker,
       { soapDuration: { observe: jest.fn() } } as unknown as MetricsService,
       dataSource,
       { webhookSecret: 'test-secret' } as never,
@@ -134,16 +149,27 @@ describe('MobileMoneyWebhookService', () => {
     expect(events.save).not.toHaveBeenCalled();
   });
 
-  it('declenche SOAP puis le rapprochement apres confirmation signee', async () => {
+  it('met l instruction bancaire en file sans attendre le back-office', async () => {
     const payload = webhook();
-    const result = await service.handle(payload, service.sign(payload));
+    await service.handle(payload, service.sign(payload));
 
-    expect(soap.convertAmountToWords).toHaveBeenCalledWith(1250.75);
-    expect(result.bankStatus).toBe(BankProcessingStatus.COMPLETED);
-    expect(reconciliation.reconcile).toHaveBeenCalledTimes(1);
+    // Le webhook accuse reception. Appeler le back-office ici ferait attendre
+    // l agregateur, qui expirerait et rejouerait — sur une jambe bancaire deja
+    // reclamee, donc sans jamais reemettre l appel perdu.
+    expect(worker.enqueue).toHaveBeenCalledTimes(1);
+    expect(soap.convertAmountToWords).not.toHaveBeenCalled();
+    expect(reconciliation.reconcile).not.toHaveBeenCalled();
+
     expect(events.save).toHaveBeenLastCalledWith(
       expect.objectContaining({ processingStatus: 'PROCESSED' }),
     );
+  });
+
+  it('appelle le back-office puis rapproche quand le travailleur execute', async () => {
+    await service.executeBankInstruction(transaction());
+
+    expect(soap.convertAmountToWords).toHaveBeenCalledWith(1250.75);
+    expect(reconciliation.reconcile).toHaveBeenCalledTimes(1);
   });
 
   it('libere la reclamation quand la transaction reste introuvable', async () => {
@@ -203,9 +229,8 @@ describe('MobileMoneyWebhookService', () => {
 
   it('ne transforme pas un echec du registre en faux echec bancaire', async () => {
     eventLedger.record.mockRejectedValueOnce(new Error('registre indisponible'));
-    const payload = webhook();
 
-    await expect(service.handle(payload, service.sign(payload))).rejects.toThrow(
+    await expect(service.executeBankInstruction(transaction())).rejects.toThrow(
       'registre indisponible',
     );
 

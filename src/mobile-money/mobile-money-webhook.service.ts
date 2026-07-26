@@ -31,6 +31,7 @@ import {
   WebhookProcessingStatus,
 } from './enums/mobile-money.enum';
 import { MobileMoneyService } from './mobile-money.service';
+import { BankInstructionWorker } from './bank-instruction.worker';
 import { ReconciliationService } from './reconciliation.service';
 
 const PG_UNIQUE_VIOLATION = '23505';
@@ -58,6 +59,7 @@ export class MobileMoneyWebhookService {
     private readonly reconciliation: ReconciliationService,
     private readonly eventLedger: TransactionEventsService,
     private readonly stateMachine: TransactionStateMachine,
+    private readonly worker: BankInstructionWorker,
     private readonly metrics: MetricsService,
     @InjectDataSource()
     private readonly dataSource: DataSource,
@@ -230,26 +232,68 @@ export class MobileMoneyWebhookService {
     transaction: Transaction,
     payload: MobileMoneyWebhookDto,
   ): Promise<Transaction> {
-    const claim = await this.mobileMoney.confirmAndClaimBankProcessing(transaction, payload);
+    const claim = await this.mobileMoney.confirmAndClaimBankProcessing(
+      transaction,
+      payload,
+      async (confirmed, manager) => {
+        await this.worker.enqueue(confirmed, manager);
+      },
+    );
     if (!claim.claimed) {
       return claim.transaction.reconciliationStatus === ReconciliationStatus.MATCHED
         ? this.reconciliation.reconcile(claim.transaction)
         : claim.transaction;
     }
-    return this.callBankAndReconcile(claim.transaction);
+    // Le webhook accuse reception, il ne rend pas compte d'une execution.
+    // L'instruction a deja ete mise en file dans la meme transaction SQL que
+    // la confirmation : l'agregateur n'attend donc jamais le back-office.
+    return claim.transaction;
   }
 
-  private async callBankAndReconcile(transaction: Transaction): Promise<Transaction> {
-    // Capture avant toute mutation : les deux issues ci-dessous modifient
-    // l'entite en place, et l'etat de depart serait sinon deja perdu.
+  /**
+   * Execute l'instruction bancaire, declenchee par le travailleur.
+   *
+   * Publique parce qu'elle est le point d'entree de la file, non parce qu'un
+   * client HTTP l'atteint.
+   */
+  async executeBankInstruction(transaction: Transaction): Promise<Transaction> {
     const before = stateOf(transaction);
+
     let bankResult: Awaited<ReturnType<SoapClientService['convertAmountToWords']>>;
     try {
       bankResult = await this.soapClient.convertAmountToWords(Number(transaction.amount));
     } catch (error) {
-      return this.handleBankFailure(transaction, before, error);
+      // Distinction decisive, et deja faite ailleurs sur les remboursements :
+      //
+      //  - une **faute metier** est un refus du back-office. La marteler
+      //    produirait le meme refus : l'echec est applique tout de suite, la
+      //    dette envers le payeur s'ouvre, et le travailleur n'a rien a rejouer.
+      //  - un **incident de transport** ne dit rien de l'issue. Le relever le
+      //    rend au travailleur, qui reessaiera apres un recul.
+      //
+      // Les confondre — ce que faisait la version couplee — condamnait un
+      // virement pour un simple hoquet reseau.
+      if (error instanceof SoapFaultException) {
+        return this.handleBankFailure(transaction, before, error);
+      }
+      throw error;
     }
 
+    return this.applyBankSuccess(transaction, before, bankResult);
+  }
+
+  /**
+   * Applique une reponse bancaire positive : audit, etat, fait consigne,
+   * rapprochement.
+   *
+   * Separee de l'appel lui-meme depuis que la file existe : le travailleur
+   * decide quoi rejouer, ce service dit quoi faire du resultat.
+   */
+  private async applyBankSuccess(
+    transaction: Transaction,
+    before: TransactionState,
+    bankResult: Awaited<ReturnType<SoapClientService['convertAmountToWords']>>,
+  ): Promise<Transaction> {
     const { amountInWords, exchange } = bankResult;
 
     // Mesure prise chez l'appelant, non dans le client : c'est la duree que la

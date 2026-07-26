@@ -9,6 +9,7 @@ import { Transaction } from '../transactions/entities/transaction.entity';
 import { MobileMoneyWebhookEvent } from '../mobile-money/entities/mobile-money-webhook-event.entity';
 import { JournalEntry } from '../accounting/entities/journal-entry.entity';
 import { JournalLine } from '../accounting/entities/journal-line.entity';
+import { BankInstruction } from '../mobile-money/entities/bank-instruction.entity';
 
 loadEnv();
 
@@ -34,6 +35,7 @@ export default new DataSource({
     Refund,
     JournalEntry,
     JournalLine,
+    BankInstruction,
   ],
   migrations: ['src/database/migrations/*.ts'],
   synchronize: false,

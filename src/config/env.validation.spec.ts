@@ -19,6 +19,14 @@ describe('validateEnv', () => {
     );
   });
 
+  it.each([
+    ['MOBILE_MONEY_BANK_WORKER_INTERVAL_MS', '99'],
+    ['MOBILE_MONEY_BANK_WORKER_MAX_ATTEMPTS', '0'],
+    ['MOBILE_MONEY_BANK_WORKER_ENABLED', 'peut-etre'],
+  ])('refuse une configuration invalide du travailleur (%s)', (key, value) => {
+    expect(() => validateEnv(validConfig({ [key]: value }))).toThrow(key);
+  });
+
   it.each(['0', '0.015', '0.999'])('accepte un taux de commission valide (%s)', (feeRate) => {
     expect(validateEnv(validConfig({ MOBILE_MONEY_FEE_RATE: feeRate }))).toMatchObject({
       MOBILE_MONEY_FEE_RATE: feeRate,

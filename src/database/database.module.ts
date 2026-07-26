@@ -9,6 +9,7 @@ import { Transaction } from '../transactions/entities/transaction.entity';
 import { MobileMoneyWebhookEvent } from '../mobile-money/entities/mobile-money-webhook-event.entity';
 import { JournalEntry } from '../accounting/entities/journal-entry.entity';
 import { JournalLine } from '../accounting/entities/journal-line.entity';
+import { BankInstruction } from '../mobile-money/entities/bank-instruction.entity';
 
 /** Entites gerees par TypeORM, partagees avec la CLI de migration. */
 export const ENTITIES = [
@@ -20,6 +21,7 @@ export const ENTITIES = [
   Refund,
   JournalEntry,
   JournalLine,
+  BankInstruction,
 ];
 
 @Module({

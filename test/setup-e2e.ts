@@ -78,6 +78,11 @@ export const E2E_READ_ONLY_AUTHORIZATION = `Bearer lecture.${[
   'long',
 ].join('-')}`;
 
+// Le travailleur d'instructions bancaires est pilote explicitement par les
+// suites : un ordonnanceur en tache de fond rendrait leurs assertions
+// dependantes du moment ou il passe.
+process.env.MOBILE_MONEY_BANK_WORKER_ENABLED = 'false';
+
 process.env.AUTH_ENABLED = 'true';
 process.env.API_KEYS =
   'e2e|1193b79696cb332993cbab421b8244fa4bbfd1cd4f9a8b28d339210e5fa46313|transfers:read,transfers:write,refunds:write,reconciliation:write,anchors:read,anchors:write,simulator:write,ledger:read,treasury:write|Tests d integration;' +

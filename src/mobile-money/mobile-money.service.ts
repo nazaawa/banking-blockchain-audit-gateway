@@ -11,7 +11,7 @@ import {
 import type { ConfigType } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, type EntityManager, Repository } from 'typeorm';
 import { getCorrelationId } from '../common/context/request-context';
 import { businessConfig, mobileMoneyConfig } from '../config/configuration';
 import { Transaction } from '../transactions/entities/transaction.entity';
@@ -182,6 +182,7 @@ export class MobileMoneyService {
   async confirmAndClaimBankProcessing(
     transaction: Transaction,
     webhook: MobileMoneyWebhookDto,
+    onClaimed?: (claimed: Transaction, manager: EntityManager) => Promise<void>,
   ): Promise<{ transaction: Transaction; claimed: boolean }> {
     // Garde-fou : la banque ne doit jamais etre instruite d'un montant que
     // l'agregateur n'a pas confirme. Le rapprochement final verifie la meme
@@ -247,6 +248,12 @@ export class MobileMoneyService {
           },
           manager,
         );
+
+        // L'etat autorisant le mouvement bancaire et l'instruction a executer
+        // doivent devenir visibles ensemble. Si la mise en file echoue, cette
+        // transaction annule aussi la confirmation et le fait consigne ; un
+        // rejeu du webhook peut alors reprendre proprement.
+        await onClaimed?.(updated, manager);
       }
 
       return { transaction: updated, claimed: outcome.affected === 1 };

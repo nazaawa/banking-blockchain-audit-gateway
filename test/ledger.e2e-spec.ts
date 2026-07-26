@@ -5,7 +5,9 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { BankInstructionWorker } from '../src/mobile-money/bank-instruction.worker';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
+import { SoapFaultException } from '../src/soap/exceptions/soap.exceptions';
 import { SoapClientService } from '../src/soap/soap-client.service';
 import type { AmountInWordsResult } from '../src/soap/soap.types';
 import { E2E_AUTHORIZATION } from './setup-e2e';
@@ -102,12 +104,19 @@ describe('Ledger en partie double (e2e)', () => {
     return { reference: response.body.reference as string, aggregator: row.aggregator_reference };
   };
 
-  const confirm = (aggregator: string, amount: number) =>
-    request(app.getHttpServer())
+  const confirm = async (aggregator: string, amount: number) => {
+    const response = await request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${aggregator}/confirm`)
       .set('Authorization', E2E_AUTHORIZATION)
       .send({ amount })
       .expect(200);
+
+    // Le webhook accuse desormais reception : l'instruction bancaire part
+    // en file. Les suites verifient l'aboutissement, elles doivent donc
+    // drainer explicitement plutot que d'attendre un ordonnanceur.
+    await app.get(BankInstructionWorker).drain();
+    return response;
+  };
 
   const balance = async (reference?: string): Promise<Balance> =>
     (
@@ -221,8 +230,16 @@ describe('Ledger en partie double (e2e)', () => {
       expect(balanceOf(report, 'SETTLEMENT')).toBe(-(1250.75 - fee));
     });
 
-    it('contre-passe la commission quand la banque echoue', async () => {
-      convertAmountToWords.mockRejectedValue(new Error('back-office indisponible'));
+    it('contre-passe la commission quand la banque refuse', async () => {
+      // Une **faute metier** : le back-office refuse, et le marteler produirait
+      // le meme refus. C'est un echec definitif, applique immediatement — a la
+      // difference d'un incident de transport, que le travailleur rejoue.
+      convertAmountToWords.mockRejectedValue(
+        new SoapFaultException(
+          { faultCode: 'soap:Server', faultString: 'Compte beneficiaire clos', soapVersion: '1.1' },
+          'NumberToDollars',
+        ),
+      );
 
       const { reference, aggregator } = await initiate(1250.75);
       await confirm(aggregator, 1250.75);

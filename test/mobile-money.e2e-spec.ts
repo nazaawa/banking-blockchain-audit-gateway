@@ -5,6 +5,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { BankInstructionWorker } from '../src/mobile-money/bank-instruction.worker';
 import { E2E_AUTHORIZATION } from './setup-e2e';
 import { EvmAnchorClient } from '../src/blockchain/evm-anchor.client';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
@@ -116,7 +117,23 @@ describe('Mobile Money (e2e)', () => {
       .send({})
       .expect(200);
 
+    // Premier temps : le webhook accuse reception. Le back-office n'a pas encore
+    // ete sollicite — l'agregateur n'a pas a l'attendre pour recevoir sa reponse.
     expect(response.body).toMatchObject({
+      providerStatus: ProviderStatus.CONFIRMED,
+      bankStatus: BankProcessingStatus.PROCESSING,
+    });
+    expect(convertAmountToWords).not.toHaveBeenCalled();
+
+    // Second temps : le travailleur draine la file et execute l'instruction.
+    await app.get(BankInstructionWorker).drain();
+
+    const settled = await request(app.getHttpServer())
+      .get(`/api/v1/mobile-money/transactions/${initiated.body.reference}`)
+      .set('Authorization', E2E_AUTHORIZATION)
+      .expect(200);
+
+    expect(settled.body).toMatchObject({
       status: 'COMPLETED',
       providerStatus: ProviderStatus.CONFIRMED,
       bankStatus: BankProcessingStatus.COMPLETED,
@@ -193,6 +210,17 @@ describe('Mobile Money (e2e)', () => {
 
     await deliver().expect(200);
     await deliver().expect(200);
+
+    // La deduplication se joue desormais a deux niveaux, et les deux comptent :
+    // l'unicite de l'evenement webhook, et celle de l'instruction en file. Une
+    // seule ligne doit exister, quelle que soit la relivraison.
+    const [{ count }] = await dataSource.query<Array<{ count: string }>>(
+      'SELECT COUNT(*)::text AS count FROM bank_instructions WHERE transaction_reference = $1',
+      [initiated.body.reference],
+    );
+    expect(count).toBe('1');
+
+    await app.get(BankInstructionWorker).drain();
     expect(convertAmountToWords).toHaveBeenCalledTimes(1);
   });
 

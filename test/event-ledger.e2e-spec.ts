@@ -5,6 +5,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { BankInstructionWorker } from '../src/mobile-money/bank-instruction.worker';
 import { E2E_AUTHORIZATION } from './setup-e2e';
 import { AnchorService } from '../src/blockchain/anchor.service';
 import { EvmAnchorClient } from '../src/blockchain/evm-anchor.client';
@@ -195,12 +196,19 @@ describe('Registre d evenements (e2e)', () => {
     return { reference: response.body.reference as string, aggregator: row.aggregator_reference };
   };
 
-  const confirm = (aggregator: string, amount: number) =>
-    request(app.getHttpServer())
+  const confirm = async (aggregator: string, amount: number) => {
+    const response = await request(app.getHttpServer())
       .post(`/api/v1/simulator/mobile-money/payments/${aggregator}/confirm`)
       .set('Authorization', E2E_AUTHORIZATION)
       .send({ amount })
       .expect(200);
+
+    // Le webhook accuse desormais reception : l'instruction bancaire part
+    // en file. Les suites verifient l'aboutissement, elles doivent donc
+    // drainer explicitement plutot que d'attendre un ordonnanceur.
+    await app.get(BankInstructionWorker).drain();
+    return response;
+  };
 
   const chainOf = async (reference: string): Promise<EventBody[]> => {
     const response = await request(app.getHttpServer())

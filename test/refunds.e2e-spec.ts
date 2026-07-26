@@ -5,6 +5,7 @@ import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DataSource } from 'typeorm';
 import { AppModule } from '../src/app.module';
+import { BankInstructionWorker } from '../src/mobile-money/bank-instruction.worker';
 import { EvmAnchorClient } from '../src/blockchain/evm-anchor.client';
 import { AllExceptionsFilter } from '../src/common/filters/all-exceptions.filter';
 import { CaseStatus, RefundStatus } from '../src/mobile-money/enums/mobile-money.enum';
@@ -105,6 +106,10 @@ describe('Remboursement (e2e)', () => {
       .set('Authorization', E2E_AUTHORIZATION)
       .send({ amount: collected })
       .expect(200);
+
+    // L'instruction bancaire part en file : la drainer ici reproduit le
+    // deroulement complet que ces scenarios supposent.
+    await app.get(BankInstructionWorker).drain();
 
     return { reference: created.body.reference as string };
   };
