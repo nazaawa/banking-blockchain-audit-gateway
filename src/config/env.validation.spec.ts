@@ -12,7 +12,60 @@ const validConfig = (overrides: Record<string, string> = {}): Record<string, str
   ...overrides,
 });
 
+const ANVIL_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const OWN_KEY = `0x${'11'.repeat(32)}`;
+
 describe('validateEnv', () => {
+  describe('cle d ancrage sur reseau public', () => {
+    it('REFUSE la cle de developpement publique hors chaine locale', () => {
+      // Le compte #0 d'Anvil est documente, cle privee comprise : ancrer avec
+      // lui reviendrait a laisser quiconque publier nos preuves a notre place.
+      expect(() =>
+        validateEnv(
+          validConfig({ BLOCKCHAIN_CHAIN_ID: '11155111', BLOCKCHAIN_PRIVATE_KEY: ANVIL_KEY }),
+        ),
+      ).toThrow(/cle de developpement publique/);
+    });
+
+    it('REFUSE aussi lorsque la cle est simplement absente', () => {
+      // L'oubli est le cas le plus probable, et le plus dangereux : la valeur
+      // par defaut est precisement cette cle publique.
+      const config = validConfig({ BLOCKCHAIN_CHAIN_ID: '11155111' });
+      delete config.BLOCKCHAIN_PRIVATE_KEY;
+
+      expect(() => validateEnv(config)).toThrow(/cle de developpement publique/);
+    });
+
+    it('tolere cette cle sur une chaine locale jetable', () => {
+      expect(() =>
+        validateEnv(
+          validConfig({ BLOCKCHAIN_CHAIN_ID: '31337', BLOCKCHAIN_PRIVATE_KEY: ANVIL_KEY }),
+        ),
+      ).not.toThrow();
+    });
+
+    it('accepte un reseau public muni d une cle propre', () => {
+      expect(() =>
+        validateEnv(
+          validConfig({ BLOCKCHAIN_CHAIN_ID: '11155111', BLOCKCHAIN_PRIVATE_KEY: OWN_KEY }),
+        ),
+      ).not.toThrow();
+    });
+
+    it('ne s applique pas quand l ancrage est desactive', () => {
+      // Sans publication, aucune signature : la cle n a alors aucun role.
+      expect(() =>
+        validateEnv(
+          validConfig({
+            BLOCKCHAIN_CHAIN_ID: '11155111',
+            BLOCKCHAIN_ENABLED: 'false',
+            BLOCKCHAIN_PRIVATE_KEY: ANVIL_KEY,
+          }),
+        ),
+      ).not.toThrow();
+    });
+  });
+
   it.each(['1', '1.5', '-0.01'])('refuse un taux de commission invalide (%s)', (feeRate) => {
     expect(() => validateEnv(validConfig({ MOBILE_MONEY_FEE_RATE: feeRate }))).toThrow(
       /MOBILE_MONEY_FEE_RATE/,

@@ -104,6 +104,12 @@ const RULES: Rule[] = [
 
 const BOOLEANS = ['1', '0', 'true', 'false', 'yes', 'no', 'on', 'off'];
 
+/** Chaines jetables : Hardhat, Anvil, Ganache. */
+const LOCAL_CHAIN_IDS = new Set([31337, 1337, 5777]);
+
+/** Compte #0 d'Anvil — publie dans sa documentation, donc sans aucun secret. */
+const WELL_KNOWN_DEV_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+
 function checkRule(rule: Rule, raw: string | undefined): string | null {
   if (raw === undefined || raw === '') {
     return rule.required ? `${rule.key} est requis mais absent` : null;
@@ -241,6 +247,29 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
       config.MOBILE_MONEY_WEBHOOK_SECRET === 'local-demo-webhook-secret')
   ) {
     errors.push('MOBILE_MONEY_WEBHOOK_SECRET doit etre un secret explicite en production');
+  }
+
+  // --- Reseaux publics : la cle de developpement est connue de tous ----------
+  //
+  // Le compte #0 d'Anvil est documente publiquement, cle privee comprise.
+  // Ancrer avec lui sur un reseau public reviendrait a laisser n'importe qui
+  // signer nos preuves — et l'ancrage perdrait exactement ce qui lui donne sa
+  // valeur : le fait que nous seuls puissions publier.
+  //
+  // La verification porte sur l'identifiant de chaine plutot que sur
+  // `NODE_ENV` : une demonstration sur testnet public depuis un poste de
+  // developpement court le meme risque qu'une production.
+  const chainId = Number.parseInt((config.BLOCKCHAIN_CHAIN_ID as string) ?? '31337', 10);
+  const anchoringEnabled = !['false', '0', 'no', 'off'].includes(
+    ((config.BLOCKCHAIN_ENABLED as string) ?? 'true').toLowerCase(),
+  );
+  const privateKey = (config.BLOCKCHAIN_PRIVATE_KEY as string) ?? WELL_KNOWN_DEV_KEY;
+
+  if (anchoringEnabled && !LOCAL_CHAIN_IDS.has(chainId) && privateKey === WELL_KNOWN_DEV_KEY) {
+    errors.push(
+      `BLOCKCHAIN_PRIVATE_KEY est la cle de developpement publique d'Anvil, inutilisable ` +
+        `sur la chaine ${chainId} : quiconque la connait pourrait ancrer a votre place`,
+    );
   }
 
   if (errors.length > 0) {
