@@ -24,7 +24,8 @@ async function main(): Promise<void> {
 
     console.log(`\nVerdict            : ${report.verdict}`);
     console.log(`Lots examines      : ${report.batchesExamined}`);
-    console.log(`Faits manquants    : ${report.eventsMissing}\n`);
+    console.log(`Faits manquants    : ${report.eventsMissing}`);
+    console.log(`Lots divergents    : ${report.batchesMismatched}\n`);
 
     for (const batch of report.batches.filter((entry) => entry.verdict !== 'COMPLETE')) {
       console.log(

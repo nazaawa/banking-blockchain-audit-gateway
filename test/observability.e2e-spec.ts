@@ -350,5 +350,21 @@ describe('Exploitation (e2e)', () => {
       expect(report.verdict).toBe('CHAIN_UNAVAILABLE');
       expect(report.findings.join(' ')).toContain('Ne remettez pas le service en ligne');
     });
+
+    it('refuse une base qui affirme un ancrage absent de la chaine', async () => {
+      const { aggregator } = await initiate(1250.75);
+      await confirm(aggregator, 1250.75);
+      await anchorService.processPendingBatch();
+
+      // La base conserve le lot ANCHORED, mais le temoin externe ne le connait
+      // plus. Ce cas ne doit jamais etre presente comme une restauration fidele.
+      chain.batches.clear();
+      const report = await app.get(RestoreVerificationService).verify();
+
+      expect(report.verdict).toBe('CHAIN_MISMATCH');
+      expect(report.batchesMismatched).toBe(1);
+      expect(report.batches[0].verdict).toBe('ABSENT_ON_CHAIN');
+      expect(report.findings.join(' ')).toContain('Ne remettez pas le service en ligne');
+    });
   });
 });

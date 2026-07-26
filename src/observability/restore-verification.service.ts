@@ -14,13 +14,14 @@ export interface BatchAudit {
   /** Nombre de faits effectivement presents en base pour ce lot. */
   restoredLeafCount: number;
   missing: number;
-  verdict: 'COMPLETE' | 'INCOMPLETE' | 'ABSENT_ON_CHAIN' | 'CHAIN_UNAVAILABLE';
+  verdict: 'COMPLETE' | 'INCOMPLETE' | 'ROOT_MISMATCH' | 'ABSENT_ON_CHAIN' | 'CHAIN_UNAVAILABLE';
 }
 
 export interface RestoreReport {
-  verdict: 'CONSISTENT' | 'DATA_LOSS' | 'CHAIN_UNAVAILABLE';
+  verdict: 'CONSISTENT' | 'DATA_LOSS' | 'CHAIN_MISMATCH' | 'CHAIN_UNAVAILABLE';
   batchesExamined: number;
   eventsMissing: number;
+  batchesMismatched: number;
   batches: BatchAudit[];
   findings: string[];
   verifiedAt: Date;
@@ -70,6 +71,7 @@ export class RestoreVerificationService {
     const findings: string[] = [];
     let chainUnavailable = false;
     let eventsMissing = 0;
+    let batchesMismatched = 0;
 
     for (const batch of anchored) {
       const restoredLeafCount = await this.events.countBy({ batchId: batch.id });
@@ -78,8 +80,22 @@ export class RestoreVerificationService {
       audits.push(audit);
       if (audit.verdict === 'CHAIN_UNAVAILABLE') chainUnavailable = true;
       if (audit.missing > 0) eventsMissing += audit.missing;
+      if (
+        audit.verdict === 'ABSENT_ON_CHAIN' ||
+        audit.verdict === 'ROOT_MISMATCH' ||
+        (audit.verdict === 'INCOMPLETE' && audit.missing === 0)
+      ) {
+        batchesMismatched += 1;
+      }
     }
 
+    if (batchesMismatched > 0) {
+      findings.push(
+        `${batchesMismatched} lot(s) marque(s) ancre(s) en base divergent de la chaine : ` +
+          'publication absente, racine differente ou nombre de feuilles local superieur. ' +
+          'Ne remettez pas le service en ligne avant investigation.',
+      );
+    }
     if (eventsMissing > 0) {
       findings.push(
         `${eventsMissing} fait(s) publie(s) sur la chaine sont absents de la base. ` +
@@ -90,12 +106,14 @@ export class RestoreVerificationService {
         'Ne pas confondre avec une alteration : les faits ne sont pas modifies, ils manquent. ' +
           'Une attaque laisserait des empreintes qui ne correspondent plus, pas des lots incomplets.',
       );
-    } else if (chainUnavailable) {
+    }
+    if (chainUnavailable) {
       findings.push(
         'Chaine injoignable : la completude n a pas pu etre etablie. ' +
           'Ne remettez pas le service en ligne sur la foi de ce rapport.',
       );
-    } else {
+    }
+    if (batchesMismatched === 0 && eventsMissing === 0 && !chainUnavailable) {
       findings.push(
         `Les ${anchored.length} lot(s) ancre(s) sont complets : la base contient tout ce ` +
           'qui a ete publie. La restauration peut etre consideree comme fidele.',
@@ -103,19 +121,27 @@ export class RestoreVerificationService {
     }
 
     const verdict: RestoreReport['verdict'] =
-      eventsMissing > 0 ? 'DATA_LOSS' : chainUnavailable ? 'CHAIN_UNAVAILABLE' : 'CONSISTENT';
+      batchesMismatched > 0
+        ? 'CHAIN_MISMATCH'
+        : eventsMissing > 0
+          ? 'DATA_LOSS'
+          : chainUnavailable
+            ? 'CHAIN_UNAVAILABLE'
+            : 'CONSISTENT';
 
     this.logger.log({
       event: 'restore.verified',
       verdict,
       batchesExamined: anchored.length,
       eventsMissing,
+      batchesMismatched,
     });
 
     return {
       verdict,
       batchesExamined: anchored.length,
       eventsMissing,
+      batchesMismatched,
       batches: audits,
       findings,
       verifiedAt: new Date(),
@@ -144,6 +170,15 @@ export class RestoreVerificationService {
       }
 
       const published = Number(onChain.leafCount);
+      if (onChain.merkleRoot.toLowerCase() !== batch.merkleRoot.toLowerCase()) {
+        return {
+          ...base,
+          publishedLeafCount: published,
+          missing: 0,
+          verdict: 'ROOT_MISMATCH',
+        };
+      }
+
       return {
         ...base,
         publishedLeafCount: published,
