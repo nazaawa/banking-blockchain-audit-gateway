@@ -16,3 +16,6 @@ npm-debug.log*
 .DS_Store
 .idea/
 .vscode/
+
+# Notes de travail personnelles
+.notes/
