@@ -1,14 +1,20 @@
 # Banking Integration & Blockchain Audit Gateway
 
-Passerelle bancaire simulée qui reçoit un paiement **Mobile Money**, attend la confirmation signée
-d'un agrégateur, déclenche l'intégration bancaire **SOAP**, rapproche les deux jambes dans
-**PostgreSQL**, consigne chaque fait métier dans un **registre append-only**, en tire une
-**comptabilité en partie double**, puis publie sur une **blockchain** une **preuve cryptographique**
-du dossier une fois celui-ci clos.
+Un payeur conteste un virement. L'IBAN du bénéficiaire n'est pas celui qu'il avait saisi.
 
-> La blockchain ne porte **aucun** paiement et **aucune** donnée bancaire. Elle sert de registre
-> d'audit inviolable : seule une racine de Merkle de 32 octets y est publiée, dont on ne peut rien
-> reconstituer.
+La piste d'audit qui doit trancher est détenue par la partie qu'elle met en cause. Qui peut modifier
+une ligne peut modifier la trace de cette ligne — et la preuve du contraire n'existe nulle part.
+
+Cette passerelle répond à ce problème précis : rendre une altération **détectable**, y compris par un
+attaquant disposant d'un accès total en écriture à la base, et **prouvable par un tiers** qui ne nous
+fait aucune confiance.
+
+> La blockchain ne porte **aucun** paiement et **aucune** donnée bancaire — seule une racine de
+> Merkle de 32 octets y est publiée, dont on ne peut rien reconstituer. Elle fournit la seule chose
+> qui manque : un point de référence que l'opérateur ne contrôle plus.
+
+Le reste — collecte Mobile Money, intégration SOAP, comptabilité en partie double — est ce qu'il
+faut pour que la question se pose sur un vrai flux de paiement plutôt que sur une démonstration.
 
 ---
 
@@ -31,11 +37,15 @@ POST /api/v1/webhooks/mobile-money
    ├─ 8. Contrôle du montant écart → AMOUNT_MISMATCH_DETECTED, BANK_PROCESSING_BLOCKED
    │                         le paiement fournisseur reste COMPLETED, la jambe
    │                         bancaire ne part pas, le remboursement passe REQUIRED
-   ├─ 9. Appel SOAP          uniquement si montant et devise concordent
-   ├─ 10. Rapprochement      RECONCILIATION_MATCHED  ou  RECONCILIATION_MISMATCH
-   └─ 11. Clôture            CASE_CLOSED — synthèse du dossier, si plus rien n'est dû
-   │
-   └─→ 200 OK
+   ├─ 9. Mise en file        l'instruction bancaire est enfilée, pas exécutée
+   └─→ 200 OK                l'agrégateur n'attend pas notre back-office
+
+[travailleur, périodique]
+   └─ Instruction échue → appel SOAP
+                        → succès  : BANK_PROCESSING_COMPLETED, rapprochement, clôture
+                        → transport en échec : recul exponentiel, nouvelle tentative
+                        → refus métier      : échec immédiat, dette envers le payeur
+                        → N échecs          : DEAD_LETTER, dossier en revue humaine
 
 [asynchrone, périodique]
    └─ Clôtures en attente → arbre de Merkle → racine publiée sur la chaîne
@@ -50,10 +60,13 @@ GET /api/v1/transfers/{ref}/verification
      · contrôle l'inclusion de la clôture auprès du contrat
 ```
 
-Quatre principes structurants :
+Cinq principes structurants :
 
 - **La transaction est enregistrée avant tout appel externe.** Le SOAP ne part qu'après réception
   d'une confirmation Mobile Money authentifiée.
+- **Un webhook accuse réception, il ne rend pas compte d'une exécution.** L'instruction bancaire part
+  en file dans la même transaction SQL que la prise de la jambe bancaire. L'agrégateur obtient sa
+  réponse sans attendre notre back-office.
 - **Rien n'est jamais corrigé, seulement complété.** Un fait nouveau s'ajoute au registre ; aucune
   preuve antérieure n'est modifiée ni remplacée. Un écart n'efface pas la confirmation qui l'a
   précédé — il la contredit, et les deux restent visibles.
@@ -83,7 +96,7 @@ Le flux de virement classique (`POST /transfers`) suit le même modèle en une s
 | Blockchain       | Chaîne EVM locale (Anvil / nœud Hardhat) + contrat Solidity |
 | Client chaîne    | `ethers` v6                                                 |
 | Documentation    | Swagger / OpenAPI 3                                         |
-| Tests            | Jest + Supertest — **399 tests**                            |
+| Tests            | Jest + Supertest — **419 tests**                            |
 | Conteneurisation | Docker multi-stage + Docker Compose                         |
 
 `xmllint-wasm` a été retenu plutôt que `libxmljs` (compilation native) ou `xsd-schema-validator`
@@ -326,6 +339,61 @@ C'est l'extinction de la dette qui autorise la clôture, donc l'ancrage.
 
 ---
 
+## La file d'instructions bancaires
+
+### Le défaut qu'elle corrige
+
+L'appel au back-office se faisait **dans le traitement du webhook** : l'agrégateur attendait notre
+réponse SOAP. Un back-office lent le faisait expirer, il rejouait, et sa relivraison retombait sur
+une jambe bancaire déjà réclamée — la confirmation était acquittée alors que l'appel se perdait en
+vol.
+
+Pire : une **seule** erreur SOAP condamnait définitivement le virement. Jambe bancaire en échec,
+dette envers le payeur, dossier à instruire. Pour une coupure réseau d'une seconde.
+
+### Ce que le webhook fait désormais
+
+Il prend la jambe bancaire et **met l'instruction en file, dans la même transaction SQL**. Puis il
+rend la main. L'agrégateur a sa réponse ; le back-office n'a encore rien vu.
+
+L'unicité sur la référence rend la mise en file idempotente : une relivraison ne peut pas produire un
+second appel bancaire, quelle que soit la course qui l'a provoquée.
+
+### Ce que le travailleur fait ensuite
+
+| Issue                     | Traitement                            | Pourquoi                                                |
+| ------------------------- | ------------------------------------- | ------------------------------------------------------- |
+| Succès                    | Rapprochement puis clôture            | Le déroulement nominal, simplement différé              |
+| **Incident de transport** | Recul exponentiel, nouvelle tentative | L'issue est inconnue : rien ne dit que l'appel a échoué |
+| **Refus métier**          | Échec appliqué immédiatement          | Le marteler produirait le même refus                    |
+| N tentatives épuisées     | `DEAD_LETTER`                         | On ne sait plus, et on cesse de deviner                 |
+
+Cette distinction entre refus métier et incident de transport est **le cœur du dispositif**. Les
+confondre — ce que faisait la version couplée — condamne un virement pour un hoquet réseau. Elle
+existait déjà sur les remboursements ; elle manquait ici.
+
+### L'abandon n'est pas un silence
+
+Après épuisement, le fournisseur a encaissé et le bénéficiaire n'a rien reçu. **Un échec définitif
+doit produire une obligation, pas une ligne de journal que personne ne relit.** L'instruction en
+`DEAD_LETTER` ouvre donc la dette envers le payeur, place le dossier en revue humaine, et consigne
+le fait au registre — donc opposable.
+
+Une instruction abandonnée n'est plus jamais exécutée : le remboursement est engagé, payer en plus
+paierait deux fois. Reprendre demande une décision humaine.
+
+### Pourquoi PostgreSQL plutôt qu'un courtier
+
+La garantie recherchée est l'atomicité entre la prise de la jambe bancaire et la mise en file. Dans
+la base, elle est gratuite : les deux écritures partagent la même transaction. Un courtier ajouterait
+une infrastructure à exploiter et un second endroit où une donnée peut se perdre — pour résoudre un
+problème que l'on n'aurait alors créé qu'en sortant de la base.
+
+La réclamation utilise `SKIP LOCKED` : plusieurs instances drainent la file de front, sur des lignes
+distinctes, sans qu'un verrou global ne les sérialise.
+
+---
+
 ## Le modèle de preuve
 
 ### Ce qui est scellé
@@ -481,6 +549,45 @@ Deux propriétés en font un registre d'audit plutôt qu'une table de hashs :
 
 `verifyInclusion` permet à un tiers de s'en remettre au seul contrat, sans faire confiance à
 l'implémentation de la passerelle.
+
+### Vérifier sans nous faire confiance
+
+Un rapport qui affirme `anchorVerified: true` demande qu'on le croie sur parole — ce qui viderait de
+son sens l'idée même d'un registre d'audit inviolable. Chaque fait ancré publie donc les coordonnées
+permettant de **refaire le contrôle sans nous** :
+
+```json
+"onChainProof": {
+  "chainId": "31337",
+  "contractAddress": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "txHash": "0xfb4b…0210",
+  "blockNumber": "10",
+  "batchId": "317d3bcf-8a1b-4aa8-b776-64330e633c0f",
+  "merkleRoot": "0x068f…9eb4",
+  "leaf": "0xcdbc…5eac",
+  "proof": ["0x…", "0x…"],
+  "explorerUrl": "https://sepolia.etherscan.io/tx/0xfb4b…0210"
+}
+```
+
+Ces valeurs ne sont **pas relues depuis la chaîne** : ce sont les éléments que nous affirmons avoir
+publiés. C'est précisément leur intérêt — un tiers les confronte lui-même au contrat via
+`verifyInclusion`, et notre affirmation devient vérifiable au lieu d'être à croire.
+
+`BLOCKCHAIN_EXPLORER_TX_URL` ajoute le lien direct quand le réseau déclare un explorateur.
+
+### Le garde-fou des réseaux publics
+
+Le compte #0 d'Anvil est documenté publiquement, clé privée comprise. Ancrer avec lui sur un réseau
+public reviendrait à laisser n'importe qui signer nos preuves — l'ancrage perdrait exactement ce qui
+lui donne sa valeur.
+
+La configuration **refuse de démarrer** si cette clé est utilisée hors chaîne locale. Le contrôle
+porte sur l'identifiant de chaîne plutôt que sur `NODE_ENV` : une démonstration sur testnet public
+depuis un poste de développement court le même risque qu'une production.
+
+Le cas dangereux est l'oubli — la valeur par défaut _est_ cette clé publique — et c'est celui qu'un
+test verrouille en priorité.
 
 ### Pourquoi la blockchain est indispensable ici
 
@@ -698,6 +805,9 @@ manquant creuserait un trou dans la chaîne, aussi son échec est-il propagé.
 le fait dont elle découle (`event_id`, **unique**), et porte des lignes `(compte, sens, montant)`.
 Append-only, et équilibre imposé par déclencheur.
 
+**`bank_instructions`** — file des instructions bancaires : une seule par transaction, statut,
+tentatives, date de prochaine tentative (recul exponentiel), dernière erreur et `retryable`.
+
 **`mobile_money_webhook_events`** — déduplication par `eventId`, avec reprise des prises périmées.
 
 > **Résidu assumé.** La table `transactions` conserve les colonnes de l'ancien scellement
@@ -817,13 +927,14 @@ La clé de contrôle MOD 97-10 n'étant pas exprimable en XSD 1.0, elle reste v�
 
 ### Migrations
 
-Quatorze migrations, rejouables depuis une base vide, `schema:log` propre à l'arrivée :
+Quinze migrations, rejouables depuis une base vide, `schema:log` propre à l'arrivée :
 
 ```
 InitialSchema · AddBlockchainAudit · AddMobileMoneyFlow · SplitPaymentStatuses
 AddTransactionEvents · AddRefunds · RefundReopenAndIntegrity · AddClosureProof
 LedgerReplacesSnapshot · AddStateInvariants · AddDoubleEntryLedger
 EncryptPartyFields · EnforceEncryptedPartyFields · AddEventActorsAndRefundActors
+AddBankInstructionQueue
 ```
 
 ---
@@ -918,8 +1029,8 @@ ancrer en parallèle, ni traiter deux fois le même webhook.
 ## Tests
 
 ```bash
-npm test          # 252 tests unitaires
-npm run test:e2e  # 147 tests d'intégration (PostgreSQL requis, exécution sérielle)
+npm test          # 262 tests unitaires
+npm run test:e2e  # 157 tests d'intégration (PostgreSQL requis, exécution sérielle)
 npm run test:cov  # couverture
 ```
 
@@ -940,6 +1051,9 @@ Couverture notable :
   protection append-only imposée par la base ;
 - **Machine à états** — chemins réels du flux acceptés, retours en arrière et états impossibles
   refusés, diagnostic complet plutôt que première violation ;
+- **File bancaire** — webhook acquitté sans appel au back-office, reprise d'un incident passager
+  sans créer de dette, recul exponentiel, abandon ouvrant une obligation, instruction abandonnée
+  jamais réexécutée, deux drainages concurrents ne doublant pas le paiement ;
 - **Exploitation** — vivacité maintenue chaîne coupée, aptitude indifférente à la blockchain,
   métriques mesurées sur un flux réel plutôt que sur base vide, perte de données distinguée d'une
   altération, refus de conclure sans témoin ;
@@ -966,8 +1080,8 @@ _pull request_. Quatre travaux en parallèle :
 | Travail      | Ce qu'il vérifie                                                            |
 | ------------ | --------------------------------------------------------------------------- |
 | `static`     | Lint sans avertissement toléré, types, build, formatage                     |
-| `unit`       | 252 tests unitaires — aucune dépendance                                     |
-| `e2e`        | 147 tests d'intégration sur un PostgreSQL 16 réel                           |
+| `unit`       | 262 tests unitaires — aucune dépendance                                     |
+| `e2e`        | 157 tests d'intégration sur un PostgreSQL 16 réel                           |
 | `migrations` | Rejeu intégral depuis une base vierge, **dérive de schéma**, retour arrière |
 
 **Aucun secret n'est requis.** Le client SOAP et la chaîne sont bouchonnés dans les suites : la
@@ -1047,6 +1161,9 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 | Écart de montant, lecture de `/metrics`         | `debt_outstanding{EUR} 1200`, `ledger_imbalance{EUR} 0`, `cases_open 1`                           |
 | Restauration antérieure au dernier ancrage      | `DATA_LOSS` — faits manquants nommés, rejeu des journaux préconisé                                |
 | Chaîne coupée pendant le contrôle               | `CHAIN_UNAVAILABLE` — refus explicite de conclure                                                 |
+| Back-office momentanément injoignable           | Rejoué après recul ; aucune dette créée tant que l'issue est inconnue                             |
+| Back-office durablement hors service            | `DEAD_LETTER` après 4 tentatives, dette ouverte, dossier en revue humaine                         |
+| Clé de développement sur chaîne non locale      | Démarrage refusé                                                                                  |
 | Consignation en échec pendant une écriture      | Écriture métier annulée ; aucun dossier orphelin, rejeu possible                                  |
 | Fuite d'IBAN (logs + audit + API)               | Aucune                                                                                            |
 
@@ -1061,6 +1178,7 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 │   ├── transactions/               # Virement classique — orchestration
 │   │   └── state/                  #   machine à états : transitions + invariants
 │   ├── mobile-money/               # Collecte, webhook signé, rapprochement
+│   │   └── bank-instruction.worker.ts  # file, recul exponentiel, DLQ
 │   ├── accounting/                 # Ledger en partie double
 │   │   ├── posting-rules.ts        #   conséquence comptable de chaque fait
 │   │   ├── ledger-posting.service.ts
@@ -1127,8 +1245,11 @@ Ce dépôt est une démonstration d'intégration, pas un service de paiement.
   externe. Une politique d'exploitation devrait surveiller l'âge des dossiers ouverts.
 - **Le déclencheur append-only protège de l'application, pas du DBA.** Un superutilisateur peut le
   désactiver. C'est précisément pour cela que l'ancrage existe : la garantie finale est hors base.
-- **Traitement synchrone du virement.** Le modèle cible serait une file de messages avec reprise
-  durable plutôt qu'un appel bloquant dans le cycle HTTP.
+- **`POST /transfers` reste synchrone.** Le flux Mobile Money est découplé ; l'ancien point d'entrée
+  ne l'est pas. C'est un choix : sa nature synchrone est la démonstration d'origine, et le découpler
+  changerait son contrat sans rien apporter à un chemin conservé pour compatibilité.
+- **Le travailleur tourne dans le processus applicatif.** Un déploiement séparé isolerait la charge
+  du back-office de celle de l'API ; la file, elle, est déjà partageable entre instances.
 - **Chiffrement au repos sans coffre.** Les IBAN sont chiffrés, mais la clé est dérivée d'un secret
   d'environnement : qui lit l'environnement lit les données. Le port de garde rend le remplacement
   par un KMS possible sans toucher au reste — il ne le remplace pas.
