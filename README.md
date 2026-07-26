@@ -35,7 +35,7 @@ POST /api/v1/webhooks/mobile-money
    ├─ 6. Déduplication       eventId unique + prise atomique de la jambe bancaire
    ├─ 7. Confirmation        PROVIDER_CONFIRMED  ou  PROVIDER_FAILED
    ├─ 8. Contrôle du montant écart → AMOUNT_MISMATCH_DETECTED, BANK_PROCESSING_BLOCKED
-   │                         le paiement fournisseur reste COMPLETED, la jambe
+   │                         le paiement fournisseur reste CONFIRMED, la jambe
    │                         bancaire ne part pas, le remboursement passe REQUIRED
    ├─ 9. Mise en file        l'instruction bancaire est enfilée, pas exécutée
    └─→ 200 OK                l'agrégateur n'attend pas notre back-office
@@ -96,7 +96,7 @@ Le flux de virement classique (`POST /transfers`) suit le même modèle en une s
 | Blockchain       | Chaîne EVM locale (Anvil / nœud Hardhat) + contrat Solidity |
 | Client chaîne    | `ethers` v6                                                 |
 | Documentation    | Swagger / OpenAPI 3                                         |
-| Tests            | Jest + Supertest — **419 tests**                            |
+| Tests            | Jest + Supertest — **420 tests**                            |
 | Conteneurisation | Docker multi-stage + Docker Compose                         |
 
 `xmllint-wasm` a été retenu plutôt que `libxmljs` (compilation native) ou `xsd-schema-validator`
@@ -164,8 +164,9 @@ verdict plafonne donc à `PARTIALLY_ANCHORED`.
 
 ### Authentification
 
-Toutes les routes métier refusent par défaut les appels sans clé d'API. Seules la sonde de santé et
-le webhook Mobile Money sont publics ; ce dernier vérifie sa propre signature HMAC.
+Toutes les routes métier refusent par défaut les appels sans clé d'API. Les sondes de santé,
+les métriques Prometheus et le webhook Mobile Money sont les seuls points d'entrée publics ; ce
+dernier vérifie sa propre signature HMAC.
 
 Le générateur affiche une seule fois un secret sous la forme `<keyId>.<secret>` et une entrée hachée
 à ajouter à `API_KEYS`. Les appels présentent ensuite :
@@ -317,6 +318,7 @@ C'est l'extinction de la dette qui autorise la clôture, donc l'ancrage.
 | `POST`  | `/mobile-money/transactions`                     | Initie une collecte Mobile Money                 |
 | `GET`   | `/mobile-money/transactions/{ref}`               | Cycle agrégateur / banque / rapprochement        |
 | `POST`  | `/webhooks/mobile-money`                         | Callback agrégateur signé et idempotent          |
+| `GET`   | `/simulator/mobile-money/payments/{ref}`         | État d'un paiement simulé                        |
 | `POST`  | `/simulator/mobile-money/payments/{ref}/confirm` | Confirmation, rejet ou écart simulé              |
 | `POST`  | `/mobile-money/reconciliation/run`               | Reprise des rapprochements éligibles             |
 | `POST`  | `/transfers`                                     | Virement classique, une seule jambe              |
@@ -356,8 +358,10 @@ dette envers le payeur, dossier à instruire. Pour une coupure réseau d'une sec
 Il prend la jambe bancaire et **met l'instruction en file, dans la même transaction SQL**. Puis il
 rend la main. L'agrégateur a sa réponse ; le back-office n'a encore rien vu.
 
-L'unicité sur la référence rend la mise en file idempotente : une relivraison ne peut pas produire un
-second appel bancaire, quelle que soit la course qui l'a provoquée.
+L'unicité sur la référence rend la **mise en file** idempotente : une relivraison ne peut pas créer
+une seconde instruction. L'exécution externe reste _at-least-once_ : après expiration du bail, une
+prise abandonnée est rejouée. Un vrai back-office de paiement doit donc dédupliquer sur la référence
+de transaction ; le service SOAP de démonstration, qui ne débite rien, ne fournit pas cette garantie.
 
 ### Ce que le travailleur fait ensuite
 
@@ -744,7 +748,7 @@ même chaîne à signer. Le même défaut a été trouvé et corrigé dans le fo
 Verrouillage optimiste via `@VersionColumn`.
 
 Les modéliser séparément est ce qui permet de représenter l'état réel d'un écart de montant : le
-paiement fournisseur reste `COMPLETED` — l'argent a bien été collecté — pendant que la jambe bancaire
+paiement fournisseur reste `CONFIRMED` — l'argent a bien été collecté — pendant que la jambe bancaire
 est `BLOCKED`, le rapprochement `AMOUNT_MISMATCH`, le dossier `MANUAL_REVIEW` et le remboursement
 `REQUIRED`. Un statut unique aurait forcé à écraser un fait vrai par un autre.
 
@@ -1003,15 +1007,16 @@ Sans outil, l'exploitant constate des verdicts `TAMPERED` en cascade sans savoir
 attaque ou à une restauration trop ancienne. **Les deux appellent des réactions opposées** : l'une
 déclenche une enquête, l'autre un rejeu des journaux.
 
-La commande relit, pour chaque lot ancré, le nombre de feuilles **publié on-chain** et le confronte
-au nombre de faits réellement présents. La chaîne, que l'opérateur ne contrôle pas, sert de témoin
-de ce qui existait au moment de la publication.
+La commande relit, pour chaque lot ancré, le nombre de feuilles et la racine **publiés on-chain**,
+puis les confronte aux faits réellement présents et au lot local. La chaîne, que l'opérateur ne
+contrôle pas, sert de témoin de ce qui existait au moment de la publication.
 
-| Verdict             | Signification                                     | Code de sortie |
-| ------------------- | ------------------------------------------------- | -------------- |
-| `CONSISTENT`        | La base contient tout ce qui a été publié         | `0`            |
-| `DATA_LOSS`         | Des faits publiés manquent — rejouer les journaux | `1`            |
-| `CHAIN_UNAVAILABLE` | Témoin injoignable, ne pas conclure               | `1`            |
+| Verdict             | Signification                                             | Code de sortie |
+| ------------------- | --------------------------------------------------------- | -------------- |
+| `CONSISTENT`        | La base contient exactement ce qui a été publié           | `0`            |
+| `DATA_LOSS`         | Des faits publiés manquent — rejouer les journaux         | `1`            |
+| `CHAIN_MISMATCH`    | Lot absent, racine différente ou surplus local — enquêter | `1`            |
+| `CHAIN_UNAVAILABLE` | Témoin injoignable, ne pas conclure                       | `1`            |
 
 Le code de sortie permet de garder une remise en service automatisée : `CHAIN_UNAVAILABLE` échoue
 délibérément, car conclure « fidèle » sans avoir pu interroger le témoin autoriserait une reprise à
@@ -1030,7 +1035,7 @@ ancrer en parallèle, ni traiter deux fois le même webhook.
 
 ```bash
 npm test          # 262 tests unitaires
-npm run test:e2e  # 157 tests d'intégration (PostgreSQL requis, exécution sérielle)
+npm run test:e2e  # 158 tests d'intégration (PostgreSQL requis, exécution sérielle)
 npm run test:cov  # couverture
 ```
 
@@ -1081,7 +1086,7 @@ _pull request_. Quatre travaux en parallèle :
 | ------------ | --------------------------------------------------------------------------- |
 | `static`     | Lint sans avertissement toléré, types, build, formatage                     |
 | `unit`       | 262 tests unitaires — aucune dépendance                                     |
-| `e2e`        | 157 tests d'intégration sur un PostgreSQL 16 réel                           |
+| `e2e`        | 158 tests d'intégration sur un PostgreSQL 16 réel                           |
 | `migrations` | Rejeu intégral depuis une base vierge, **dérive de schéma**, retour arrière |
 
 **Aucun secret n'est requis.** Le client SOAP et la chaîne sont bouchonnés dans les suites : la
@@ -1184,8 +1189,9 @@ Exercé contre le vrai service DataAccess, une chaîne Anvil/Hardhat locale et u
 │   │   ├── ledger-posting.service.ts
 │   │   └── ledger-guards.ts        #   équilibre + immuabilité, SQL partagé
 │   ├── treasury/                   # Rapatriement des fonds vers la banque
-│   ├── refunds/                    # Remboursement idempotent avec reprise
+│   ├── refunds/                    # Remboursement idempotent avec reprise périodique
 │   │   ├── provider-refund.port.ts #   port fournisseur (adaptateur simulé)
+│   │   ├── refund-retry.worker.ts  #   reprise des incidents de transport
 │   │   └── refunds.service.ts
 │   ├── events/                     # Registre append-only des faits
 │   │   ├── transaction-events.service.ts     #   consignation, chaînage, clôture
@@ -1250,6 +1256,9 @@ Ce dépôt est une démonstration d'intégration, pas un service de paiement.
   changerait son contrat sans rien apporter à un chemin conservé pour compatibilité.
 - **Le travailleur tourne dans le processus applicatif.** Un déploiement séparé isolerait la charge
   du back-office de celle de l'API ; la file, elle, est déjà partageable entre instances.
+- **Livraison bancaire _at-least-once_.** Une prise `IN_FLIGHT` devenue périmée est rejouée. Un vrai
+  back-office doit donc accepter la référence de transaction comme clé d'idempotence ; le SOAP de
+  démonstration ne déplace aucun fonds et ne modélise pas cette garantie externe.
 - **Chiffrement au repos sans coffre.** Les IBAN sont chiffrés, mais la clé est dérivée d'un secret
   d'environnement : qui lit l'environnement lit les données. Le port de garde rend le remplacement
   par un KMS possible sans toucher au reste — il ne le remplace pas.
