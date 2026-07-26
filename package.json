@@ -2,9 +2,9 @@
   "name": "banking-blockchain-audit-gateway",
   "version": "1.0.0",
   "description": "Passerelle bancaire : API REST -> XML canonique valide par XSD -> service SOAP -> PostgreSQL -> preuve d'integrite ancree sur blockchain (Merkle)",
-  "author": "",
+  "author": "nazaawa <johnnyetsha@gmail.com>",
   "private": true,
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "engines": {
     "node": ">=20.11.0"
   },

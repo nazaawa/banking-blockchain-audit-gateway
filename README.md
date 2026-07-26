@@ -1273,3 +1273,21 @@ Ce dépôt est une démonstration d'intégration, pas un service de paiement.
   voudrait surveiller sa profondeur.
 - **Aucune clôture de période.** Les soldes sont cumulatifs depuis l'origine ; il n'existe ni
   exercice, ni report à nouveau, ni états financiers.
+
+---
+
+## Licence
+
+**GNU General Public License v3.0** — texte intégral dans [`LICENSE`](LICENSE).
+
+Copyright © 2026 nazaawa
+
+Ce programme est un logiciel libre : vous pouvez le redistribuer et/ou le modifier selon les termes
+de la GNU General Public License telle que publiée par la Free Software Foundation, dans sa version 3.
+
+Il est distribué dans l'espoir qu'il sera utile, mais **SANS AUCUNE GARANTIE** — sans même la
+garantie implicite de qualité marchande ou d'adéquation à un usage particulier. Voir la GNU General
+Public License pour plus de détails.
+
+> La GPL est **copyleft** : un travail dérivé distribué doit l'être sous la même licence, code source
+> compris. C'est un choix, pas un défaut — mais il vaut mieux le savoir avant de partir de ce dépôt.
